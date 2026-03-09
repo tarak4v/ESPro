@@ -1,0 +1,31 @@
+Command: ninja all
+[1/22] Building C object esp-idf/main/CMakeFiles/__idf_main.dir/app_manager.c.obj
+[2/22] Building C object esp-idf/main/CMakeFiles/__idf_main.dir/wifi_time.c.obj
+[3/22] Building C object esp-idf/main/CMakeFiles/__idf_main.dir/main.c.obj
+[4/22] Building C object esp-idf/main/CMakeFiles/__idf_main.dir/screen_clock.c.obj
+[5/22] Building C object esp-idf/lcd_bl_pwm_bsp/CMakeFiles/__idf_lcd_bl_pwm_bsp.dir/lcd_bl_pwm_bsp.c.obj
+[6/22] Building C object esp-idf/main/CMakeFiles/__idf_main.dir/weather.c.obj
+[7/22] Building C object esp-idf/main/CMakeFiles/__idf_main.dir/screen_menu.c.obj
+[8/22] Building C object esp-idf/main/CMakeFiles/__idf_main.dir/screen_settings.c.obj
+[9/22] Building C object esp-idf/i2c_bsp/CMakeFiles/__idf_i2c_bsp.dir/i2c_bsp.c.obj
+[10/22] Building C object esp-idf/main/CMakeFiles/__idf_main.dir/boot_sound.c.obj
+[11/22] Building C object esp-idf/main/CMakeFiles/__idf_main.dir/game_maze.c.obj
+[12/22] Building C object esp-idf/main/CMakeFiles/__idf_main.dir/music_player.c.obj
+[13/22] Linking C static library esp-idf\main\libmain.a
+[14/22] Performing build step for 'bootloader'
+[1/1] C:\WINDOWS\system32\cmd.exe /C "cd /D D:\tarak\SS_Smallstart_VS\build\bootloader\esp-idf\esptool_py && C:\Espressif\python_env\idf5.5_py3.11_env\Scripts\python.exe C:/Espressif/frameworks/esp-idf-v5.5.1/components/partition_table/check_sizes.py --offset 0x8000 bootloader 0x0 D:/tarak/SS_Smallstart_VS/build/bootloader/bootloader.bin"
+Bootloader binary size 0x5240 bytes. 0x2dc0 bytes (36%) free.
+[15/22] No install step for 'bootloader'
+[16/22] Linking C static library esp-idf\lcd_bl_pwm_bsp\liblcd_bl_pwm_bsp.a
+[17/22] Completed 'bootloader'
+[18/22] Linking C static library esp-idf\i2c_bsp\libi2c_bsp.a
+[19/22] Generating esp-idf/esp_system/ld/sections.ld
+[20/22] Linking CXX executable SS_Smallstart.elf
+[21/22] Generating binary image from built executable
+esptool.py v4.11.dev1
+Creating esp32s3 image...
+Merged 2 ELF sections
+Successfully created esp32s3 image.
+Generated D:/tarak/SS_Smallstart_VS/build/SS_Smallstart.bin
+[22/22] C:\WINDOWS\system32\cmd.exe /C "cd /D D:\tarak\SS_Smallstart_VS\build\esp-idf\esptool_py && C:\Espressif\python_env\idf5.5_py3.11_env\Scripts\python.exe C:/Espressif/frameworks/esp-idf-v5.5.1/components/partition_table/check_sizes.py --offset 0x8000 partition --type app D:/tarak/SS_Smallstart_VS/build/partition_table/partition-table.bin D:/tarak/SS_Smallstart_VS/build/SS_Smallstart.bin"
+SS_Smallstart.bin binary size 0x1b0f10 bytes. Smallest app partition is 0x800000 bytes. 0x64f0f0 bytes (79%) free.
