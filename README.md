@@ -207,4 +207,4 @@ This project is built upon the following open-source projects. Thank you to all 
 
 ## License
 
-Private project — Aneri, Hiral, Tarak.
+Private project — Tarak.
