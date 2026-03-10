@@ -11,8 +11,6 @@
 #include "i2c_bsp.h"
 
 #include "driver/i2s_std.h"
-#include "esp_io_expander.h"
-#include "esp_io_expander_tca9554.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
@@ -26,9 +24,6 @@ static const char *TAG = "sound";
 #define TONE_SAMPLE_RATE   16000
 #define TONE_DURATION_MS   600
 #define TONE_NUM_SAMPLES   (TONE_SAMPLE_RATE * TONE_DURATION_MS / 1000)
-
-/* TCA9554 PA enable pin */
-#define TCA9554_PA_PIN     IO_EXPANDER_PIN_NUM_7
 
 /* ── ES8311 register helpers ──────────────────────────────── */
 
@@ -86,24 +81,18 @@ static void es8311_codec_init(void)
 
 void boot_sound_play(void)
 {
-    /* 1. Initialise TCA9554 IO expander (PA control) */
-    esp_io_expander_handle_t io_exp = NULL;
-    esp_err_t ret = esp_io_expander_new_i2c_tca9554(
-        i2c_port0_bus_handle,
-        ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000,
-        &io_exp);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "TCA9554 init failed (%s) — skipping boot sound",
-                 esp_err_to_name(ret));
+    /* PA is already enabled by i2c_bsp via shared TCA9554 handle.
+     * If not available, skip boot sound gracefully. */
+    if (!io_expander_handle) {
+        ESP_LOGW(TAG, "No IO expander — skipping boot sound");
         return;
     }
-    esp_io_expander_set_dir(io_exp, TCA9554_PA_PIN, IO_EXPANDER_OUTPUT);
 
-    /* 2. Initialise ES8311 codec */
+    /* 1. Initialise ES8311 codec */
     es8311_codec_init();
 
-    /* 3. Enable power amplifier */
-    esp_io_expander_set_level(io_exp, TCA9554_PA_PIN, 1);
+    /* 2. Ensure PA is on (should already be from i2c_bsp init) */
+    esp_io_expander_set_level(io_expander_handle, TCA9554_PA_PIN_BIT, 1);
     vTaskDelay(pdMS_TO_TICKS(100));
 
     /* 4. Configure I2S TX channel */
@@ -158,10 +147,9 @@ void boot_sound_play(void)
         heap_caps_free(samples);
     }
 
-    /* 6. Tear down */
+    /* 6. Tear down I2S (PA stays on — managed by i2c_bsp) */
     i2s_channel_disable(tx_chan);
     i2s_del_channel(tx_chan);
-    esp_io_expander_set_level(io_exp, TCA9554_PA_PIN, 0);
 
     ESP_LOGI(TAG, "Boot ting played");
 }

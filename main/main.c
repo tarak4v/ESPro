@@ -37,8 +37,10 @@
 #include "wifi_time.h"
 #include "boot_sound.h"
 #include "screen_settings.h"
+#include "screen_tamafi.h"
 #include "weather.h"
 #include "sd_log.h"
+#include "macropad.h"
 
 static const char *TAG = "main";
 
@@ -400,8 +402,14 @@ void app_main(void)
     /* ── WiFi + NTP ───────────────────────────────────────── */
     wifi_time_init();
 
+    /* ── BLE HID macropad (must init before any BLE use) ── */
+    macropad_init();
+
     /* Load persistent settings from NVS (volume, boot sound, 24h) */
     settings_load_from_nvs();
+
+    /* Load TamaFi pet state from NVS */
+    tamafi_load_from_nvs();
 
     /* ── Touch input device ───────────────────────────────── */
     static lv_indev_drv_t indev_drv;

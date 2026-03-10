@@ -2,12 +2,15 @@
 #define I2C_BSP_H
 
 #include "driver/i2c_master.h"
+#include "esp_io_expander.h"
 
 extern i2c_master_dev_handle_t disp_touch_dev_handle;
 extern i2c_master_dev_handle_t rtc_dev_handle;
 extern i2c_master_dev_handle_t imu_dev_handle;
 extern i2c_master_dev_handle_t es8311_dev_handle;
+extern i2c_master_dev_handle_t es7210_dev_handle;
 extern i2c_master_bus_handle_t i2c_port0_bus_handle;
+extern esp_io_expander_handle_t io_expander_handle;
 
 #ifdef __cplusplus
 extern "C" {

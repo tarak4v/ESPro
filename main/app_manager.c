@@ -11,6 +11,7 @@
 #include "screen_clock.h"
 #include "screen_menu.h"
 #include "screen_settings.h"
+#include "screen_tamafi.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -37,6 +38,7 @@ static const screen_ops_t screen_table[MODE_COUNT] = {
     [MODE_CLOCK]    = { screen_clock_create,    screen_clock_destroy    },
     [MODE_MENU]     = { screen_menu_create,     screen_menu_destroy     },
     [MODE_SETTINGS] = { screen_settings_create, screen_settings_destroy },
+    [MODE_TAMAFI]   = { screen_tamafi_create,   screen_tamafi_destroy   },
 };
 
 /* ── Transition ───────────────────────────────────────────── */
@@ -54,12 +56,20 @@ static void load_screen(app_mode_t new_mode)
 
 static void navigate_next(void)
 {
-    load_screen((current_mode + 1) % MODE_COUNT);
+    if (current_mode >= MODE_SWIPE_COUNT) {
+        load_screen(MODE_MENU);          /* from Pet → back to menu */
+        return;
+    }
+    load_screen((current_mode + 1) % MODE_SWIPE_COUNT);
 }
 
 static void navigate_prev(void)
 {
-    load_screen(current_mode == 0 ? MODE_COUNT - 1 : current_mode - 1);
+    if (current_mode >= MODE_SWIPE_COUNT) {
+        load_screen(MODE_MENU);
+        return;
+    }
+    load_screen(current_mode == 0 ? MODE_SWIPE_COUNT - 1 : current_mode - 1);
 }
 
 /* ── Public API ───────────────────────────────────────────── */
@@ -109,6 +119,7 @@ void app_manager_update(void)
     switch (current_mode) {
         case MODE_CLOCK:    screen_clock_update();    break;
         case MODE_MENU:     screen_menu_update();     break;
+        case MODE_TAMAFI:   screen_tamafi_update();   break;
         default: break;
     }
 }

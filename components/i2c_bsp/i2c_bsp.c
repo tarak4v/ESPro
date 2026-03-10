@@ -1,7 +1,11 @@
 #include <stdio.h>
 #include "i2c_bsp.h"
 #include "hw_config.h"
+#include "esp_io_expander_tca9554.h"
+#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+
+static const char *TAG_I2C = "i2c_bsp";
 
 static i2c_master_bus_handle_t user_i2c_port0_handle = NULL;
 static i2c_master_bus_handle_t user_i2c_port1_handle = NULL;
@@ -10,7 +14,9 @@ i2c_master_dev_handle_t disp_touch_dev_handle = NULL;
 i2c_master_dev_handle_t rtc_dev_handle = NULL;
 i2c_master_dev_handle_t imu_dev_handle = NULL;
 i2c_master_dev_handle_t es8311_dev_handle = NULL;
+i2c_master_dev_handle_t es7210_dev_handle = NULL;
 i2c_master_bus_handle_t i2c_port0_bus_handle = NULL;
+esp_io_expander_handle_t io_expander_handle = NULL;
 
 static uint32_t i2c_data_pdMS_TICKS = 0;
 static uint32_t i2c_done_pdMS_TICKS = 0;
@@ -53,13 +59,33 @@ void i2c_master_Init(void)
     dev_cfg.device_address = IMU_I2C_ADDR;
     ESP_ERROR_CHECK(i2c_master_bus_add_device(user_i2c_port0_handle, &dev_cfg, &imu_dev_handle));
 
-    /* Add ES8311 audio codec */
-    dev_cfg.device_address = 0x18;
+    /* Add ES8311 audio codec (DAC/speaker) */
+    dev_cfg.device_address = ES8311_I2C_ADDR;
     ESP_ERROR_CHECK(i2c_master_bus_add_device(user_i2c_port0_handle, &dev_cfg, &es8311_dev_handle));
+
+    /* Add ES7210 audio codec (ADC/microphone) */
+    dev_cfg.device_address = ES7210_I2C_ADDR;
+    ESP_ERROR_CHECK(i2c_master_bus_add_device(user_i2c_port0_handle, &dev_cfg, &es7210_dev_handle));
 
     /* Add Touch device */
     dev_cfg.device_address = TOUCH_I2C_ADDR;
     ESP_ERROR_CHECK(i2c_master_bus_add_device(user_i2c_port1_handle, &dev_cfg, &disp_touch_dev_handle));
+
+    /* TCA9554 IO expander — enable PA (PIN 7) + codec/mic (PIN 6) */
+    esp_err_t ret = esp_io_expander_new_i2c_tca9554(
+        i2c_port0_bus_handle,
+        ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000,
+        &io_expander_handle);
+    if (ret == ESP_OK) {
+        esp_io_expander_set_dir(io_expander_handle,
+            TCA9554_PA_PIN_BIT | TCA9554_CODEC_PIN_BIT,
+            IO_EXPANDER_OUTPUT);
+        esp_io_expander_set_level(io_expander_handle,
+            TCA9554_PA_PIN_BIT | TCA9554_CODEC_PIN_BIT, 1);
+        ESP_LOGI(TAG_I2C, "TCA9554: PA + codec pins enabled");
+    } else {
+        ESP_LOGW(TAG_I2C, "TCA9554 init failed: %s", esp_err_to_name(ret));
+    }
 }
 
 uint8_t i2c_writr_buff(i2c_master_dev_handle_t dev_handle, int reg,

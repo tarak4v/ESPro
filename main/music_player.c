@@ -17,8 +17,6 @@
 #include "esp_log.h"
 #include "esp_http_client.h"
 #include "driver/i2s_std.h"
-#include "esp_io_expander.h"
-#include "esp_io_expander_tca9554.h"
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -83,7 +81,6 @@ static TaskHandle_t         s_decode_task = NULL;
 static volatile bool        s_stop_requested = false;
 
 static i2s_chan_handle_t         s_i2s_tx = NULL;
-static esp_io_expander_handle_t  s_io_exp = NULL;
 static mp3dec_t                  s_mp3dec;
 
 /* ICY metadata interval (set by HTTP event handler) */
@@ -138,19 +135,9 @@ static void es8311_codec_init(void)
  * ================================================================ */
 static void audio_init(int sample_rate)
 {
-    /* Power amplifier via TCA9554 */
-    if (!s_io_exp) {
-        esp_err_t ret = esp_io_expander_new_i2c_tca9554(
-            i2c_port0_bus_handle,
-            ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000,
-            &s_io_exp);
-        if (ret != ESP_OK)
-            ESP_LOGW(TAG, "TCA9554: %s", esp_err_to_name(ret));
-    }
-    if (s_io_exp) {
-        esp_io_expander_set_dir(s_io_exp, IO_EXPANDER_PIN_NUM_7,
-                                IO_EXPANDER_OUTPUT);
-        esp_io_expander_set_level(s_io_exp, IO_EXPANDER_PIN_NUM_7, 1);
+    /* PA is already enabled by i2c_bsp via shared TCA9554 handle */
+    if (io_expander_handle) {
+        esp_io_expander_set_level(io_expander_handle, TCA9554_PA_PIN_BIT, 1);
     }
     vTaskDelay(pdMS_TO_TICKS(50));
 
@@ -191,9 +178,7 @@ static void audio_deinit(void)
         i2s_del_channel(s_i2s_tx);
         s_i2s_tx = NULL;
     }
-    if (s_io_exp) {
-        esp_io_expander_set_level(s_io_exp, IO_EXPANDER_PIN_NUM_7, 0);
-    }
+    /* PA stays on — managed globally by i2c_bsp */
 }
 
 /* ================================================================

@@ -96,8 +96,16 @@
 #define PIN_NUM_I2S_DOUT      GPIO_NUM_45
 #define PIN_NUM_I2S_DIN       GPIO_NUM_6
 
-/* ES8311 audio codec on I2C port 0 */
+/* ES8311 audio codec (DAC/speaker) on I2C port 0 */
 #define ES8311_I2C_ADDR       0x18
+
+/* ES7210 audio codec (ADC/microphone) on I2C port 0 */
+#define ES7210_I2C_ADDR       0x40
+
+/* TCA9554 IO expander audio control pin bit masks
+ * (matching IO_EXPANDER_PIN_NUM_x values) */
+#define TCA9554_PA_PIN_BIT        (1ULL << 7)   /* Speaker PA enable  */
+#define TCA9554_CODEC_PIN_BIT     (1ULL << 6)   /* Codec/mic enable   */
 
 /*=============================================================
  * WiFi Configuration
@@ -114,7 +122,7 @@
 /*=============================================================
  * Firmware Version
  *=============================================================*/
-#define FW_VERSION            "AneriHiralTarak_V1.0"
+#define FW_VERSION            "ESPro"
 
 /*=============================================================
  * HuggingFace AI Assistant Configuration

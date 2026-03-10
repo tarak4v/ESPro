@@ -9,6 +9,7 @@
 
 #include "screen_settings.h"
 #include "app_manager.h"
+#include "screen_menu.h"
 #include "hw_config.h"
 #include "i2c_bsp.h"
 #include "lcd_bl_pwm_bsp.h"
@@ -26,7 +27,6 @@
 static const char *TAG = "settings";
 
 static lv_obj_t *scr = NULL;
-static lv_obj_t *mode_dot[3];
 static lv_obj_t *vol_pct_lbl = NULL;
 
 /* ── Shared settings (read by other modules) ──────────────── */
@@ -106,9 +106,28 @@ static void reboot_cb(lv_event_t *e)
     esp_restart();
 }
 
+static void settings_back_cb(lv_event_t *e)
+{
+    (void)e;
+    app_manager_set_mode(MODE_MENU);
+}
+
+static void wifi_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    screen_menu_request_wifi();
+    app_manager_set_mode(MODE_MENU);
+}
+
+static void ble_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    screen_menu_request_ble();
+    app_manager_set_mode(MODE_MENU);
+}
+
 /* ── Styles ───────────────────────────────────────────────── */
 static lv_style_t style_bg, style_label, style_value;
-static lv_style_t style_dot_active, style_dot_inactive;
 
 static void init_styles(void)
 {
@@ -123,20 +142,6 @@ static void init_styles(void)
     lv_style_init(&style_value);
     lv_style_set_text_color(&style_value, lv_color_hex(0xFFFFFF));
     lv_style_set_text_font(&style_value, &lv_font_montserrat_14);
-
-    lv_style_init(&style_dot_active);
-    lv_style_set_bg_color(&style_dot_active, lv_color_hex(0xFF6644));
-    lv_style_set_bg_opa(&style_dot_active, LV_OPA_COVER);
-    lv_style_set_radius(&style_dot_active, LV_RADIUS_CIRCLE);
-    lv_style_set_width(&style_dot_active, 8);
-    lv_style_set_height(&style_dot_active, 8);
-
-    lv_style_init(&style_dot_inactive);
-    lv_style_set_bg_color(&style_dot_inactive, lv_color_hex(0x333333));
-    lv_style_set_bg_opa(&style_dot_inactive, LV_OPA_COVER);
-    lv_style_set_radius(&style_dot_inactive, LV_RADIUS_CIRCLE);
-    lv_style_set_width(&style_dot_inactive, 6);
-    lv_style_set_height(&style_dot_inactive, 6);
 }
 
 /* ── Helper: labelled slider row ──────────────────────────── */
@@ -262,11 +267,38 @@ void screen_settings_create(void)
     lv_obj_set_style_text_font(wifi_lbl, &lv_font_montserrat_12, 0);
     lv_obj_set_pos(wifi_lbl, 240, 78);
 
-    /* ════════════════════ RIGHT: Reboot ═════════════════════ */
+    /* ════════════════════ RIGHT COLUMN ════════════════════ */
 
+    /* WiFi button (small) */
+    lv_obj_t *wifi_btn = lv_btn_create(scr);
+    lv_obj_set_size(wifi_btn, 58, 28);
+    lv_obj_set_pos(wifi_btn, 520, 24);
+    lv_obj_set_style_bg_color(wifi_btn, lv_color_hex(0x8B4513), 0);
+    lv_obj_set_style_radius(wifi_btn, 8, 0);
+    lv_obj_add_event_cb(wifi_btn, wifi_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *wl = lv_label_create(wifi_btn);
+    lv_label_set_text(wl, LV_SYMBOL_WIFI);
+    lv_obj_set_style_text_font(wl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(wl, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_center(wl);
+
+    /* BLE button (small) */
+    lv_obj_t *ble_btn = lv_btn_create(scr);
+    lv_obj_set_size(ble_btn, 58, 28);
+    lv_obj_set_pos(ble_btn, 582, 24);
+    lv_obj_set_style_bg_color(ble_btn, lv_color_hex(0x1A3366), 0);
+    lv_obj_set_style_radius(ble_btn, 8, 0);
+    lv_obj_add_event_cb(ble_btn, ble_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *btl = lv_label_create(ble_btn);
+    lv_label_set_text(btl, LV_SYMBOL_BLUETOOTH);
+    lv_obj_set_style_text_font(btl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(btl, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_center(btl);
+
+    /* Reboot button */
     lv_obj_t *rbtn = lv_btn_create(scr);
-    lv_obj_set_size(rbtn, 100, 32);
-    lv_obj_set_pos(rbtn, 520, 28);
+    lv_obj_set_size(rbtn, 100, 28);
+    lv_obj_set_pos(rbtn, 520, 58);
     lv_obj_set_style_bg_color(rbtn, lv_color_hex(0x882222), 0);
     lv_obj_set_style_radius(rbtn, 8, 0);
     lv_obj_add_event_cb(rbtn, reboot_cb, LV_EVENT_CLICKED, NULL);
@@ -276,25 +308,18 @@ void screen_settings_create(void)
     lv_obj_set_style_text_color(rl, lv_color_hex(0xFFFFFF), 0);
     lv_obj_center(rl);
 
-    /* ── Page indicator dots ──── */
-    lv_obj_t *dot_row = lv_obj_create(scr);
-    lv_obj_remove_style_all(dot_row);
-    lv_obj_set_size(dot_row, 80, 12);
-    lv_obj_align(dot_row, LV_ALIGN_BOTTOM_MID, 0, -4);
-    lv_obj_set_flex_flow(dot_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(dot_row, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(dot_row, 8, 0);
-    lv_obj_clear_flag(dot_row, LV_OBJ_FLAG_SCROLLABLE);
-
-    for (int i = 0; i < 3; i++) {
-        mode_dot[i] = lv_obj_create(dot_row);
-        lv_obj_remove_style_all(mode_dot[i]);
-        if (i == 2)
-            lv_obj_add_style(mode_dot[i], &style_dot_active, 0);
-        else
-            lv_obj_add_style(mode_dot[i], &style_dot_inactive, 0);
-    }
+    /* ── Back button ──── */
+    lv_obj_t *back = lv_btn_create(scr);
+    lv_obj_set_size(back, 60, 26);
+    lv_obj_align(back, LV_ALIGN_BOTTOM_LEFT, 8, -4);
+    lv_obj_set_style_bg_color(back, lv_color_hex(0x333333), 0);
+    lv_obj_set_style_radius(back, 8, 0);
+    lv_obj_add_event_cb(back, settings_back_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *bl = lv_label_create(back);
+    lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
+    lv_obj_set_style_text_font(bl, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(bl, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_center(bl);
 
     lv_disp_load_scr(scr);
     ESP_LOGI(TAG, "Settings screen created");

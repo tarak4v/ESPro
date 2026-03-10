@@ -23,15 +23,12 @@
 #include "host/ble_gap.h"
 #include "nimble/nimble_port_freertos.h"
 #include "esp_system.h"
-#include "esp_chip_info.h"
-#include "esp_heap_caps.h"
-#include "esp_timer.h"
 #include "i2c_bsp.h"
 #include <string.h>
 #include <stdio.h>
 #include "game_maze.h"
 #include "music_player.h"
-#include "lwip/sockets.h"
+#include "macropad.h"
 
 static const char *TAG = "menu";
 
@@ -84,13 +81,13 @@ typedef struct {
 } menu_entry_t;
 
 static const menu_entry_t apps[] = {
-    { "BLE",      LV_SYMBOL_BLUETOOTH, 0x1A3366 },
-    { "WiFi",     LV_SYMBOL_WIFI,      0x8B4513 },
     { "LED",      LV_SYMBOL_CHARGE,    0x1B5E20 },
     { "AI",       LV_SYMBOL_EDIT,      0x6A1B9A },
     { "Game",     LV_SYMBOL_PLAY,      0x880E4F },
     { "Music",    LV_SYMBOL_AUDIO,     0x7B6800 },
-    { "Monitor",  LV_SYMBOL_EYE_OPEN,  0x1A4060 },
+    { "Pet",      LV_SYMBOL_HOME,      0x2E7D32 },
+    { "Macropad", LV_SYMBOL_KEYBOARD,  0x37474F },
+    { "Settings", LV_SYMBOL_SETTINGS,  0x546E7A },
 };
 #define APP_COUNT (sizeof(apps) / sizeof(apps[0]))
 
@@ -99,41 +96,6 @@ static void open_wifi_overlay(void);
 static void open_ble_overlay(void);
 static void open_led_overlay(void);
 static void open_ai_overlay(void);
-static void open_monitor_overlay(void);
-static void monitor_update_tick(void);
-
-/* ── System monitor state ─────────────────────────────────── */
-static bool     s_monitor_active = false;
-static lv_obj_t *mon_heap_bar    = NULL;
-static lv_obj_t *mon_heap_lbl    = NULL;
-static lv_obj_t *mon_psram_bar   = NULL;
-static lv_obj_t *mon_psram_lbl   = NULL;
-static lv_obj_t *mon_uptime_lbl  = NULL;
-static lv_obj_t *mon_tasks_lbl   = NULL;
-static lv_obj_t *mon_wifi_lbl    = NULL;
-static lv_obj_t *mon_temp_lbl    = NULL;
-
-/* ── PC Resource Monitor (UDP) ────────────────────────────── */
-#define PC_MON_UDP_PORT  9999
-
-static volatile float   pc_cpu_pct   = 0;
-static volatile float   pc_ram_pct   = 0;
-static volatile float   pc_ram_used  = 0;
-static volatile float   pc_ram_total = 0;
-static volatile float   pc_disk_pct  = 0;
-static volatile float   pc_gpu_pct   = 0;
-static volatile float   pc_gpu_temp  = 0;
-static volatile bool    pc_connected = false;
-static volatile int64_t pc_last_rx   = 0;
-static TaskHandle_t     pc_udp_task_handle = NULL;
-
-static lv_obj_t *mon_pc_status_lbl = NULL;
-static lv_obj_t *mon_pc_cpu_bar    = NULL;
-static lv_obj_t *mon_pc_cpu_lbl    = NULL;
-static lv_obj_t *mon_pc_ram_bar    = NULL;
-static lv_obj_t *mon_pc_ram_lbl    = NULL;
-static lv_obj_t *mon_pc_disk_lbl   = NULL;
-static lv_obj_t *mon_pc_gpu_lbl    = NULL;
 
 /* ── Close overlay ────────────────────────────────────────── */
 static void back_btn_cb(lv_event_t *e) { (void)e; close_overlay(); }
@@ -145,15 +107,6 @@ static void close_overlay(void)
     wifi_kb = NULL; wifi_ta = NULL; wifi_kb_overlay = NULL;
     ble_list  = NULL; ble_status_lbl  = NULL;
     ai_response_lbl = NULL; ai_status_lbl = NULL;
-    s_monitor_active = false;
-    mon_heap_bar = mon_psram_bar = NULL;
-    mon_heap_lbl = mon_psram_lbl = NULL;
-    mon_uptime_lbl = mon_tasks_lbl = NULL;
-    mon_wifi_lbl = mon_temp_lbl = NULL;
-    mon_pc_status_lbl = NULL;
-    mon_pc_cpu_bar = mon_pc_cpu_lbl = NULL;
-    mon_pc_ram_bar = mon_pc_ram_lbl = NULL;
-    mon_pc_disk_lbl = mon_pc_gpu_lbl = NULL;
 }
 
 static lv_obj_t *create_overlay_base(uint32_t bg_color)
@@ -520,6 +473,11 @@ static void ble_host_task(void *param)
 static void ble_init_once(void)
 {
     if (s_ble_inited) return;
+    /* If macropad already brought up NimBLE + HID, reuse it */
+    if (macropad_ble_inited()) {
+        s_ble_inited = true;
+        return;
+    }
     esp_err_t ret = nimble_port_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "NimBLE init failed: %s", esp_err_to_name(ret));
@@ -896,346 +854,25 @@ static void open_led_overlay(void)
     led_on = false;
 }
 
-/* ================================================================
- *  System Monitor overlay
- * ================================================================ */
-
-/* Read QMI8658 on-chip temperature (reg 0x33-0x34, 1/256 °C) */
-static float read_imu_temp(void)
-{
-    uint8_t buf[2] = {0};
-    i2c_read_buff(imu_dev_handle, 0x33, buf, 2);
-    int16_t raw = (int16_t)((buf[1] << 8) | buf[0]);
-    return (float)raw / 256.0f;
-}
-
-/* Helper: create a labelled progress bar */
-static lv_obj_t *mon_add_bar(lv_obj_t *parent, const char *label,
-                              int x, int y, int w, lv_obj_t **lbl_out)
-{
-    lv_obj_t *l = lv_label_create(parent);
-    lv_label_set_text(l, label);
-    lv_obj_set_style_text_color(l, lv_color_hex(0x888888), 0);
-    lv_obj_set_style_text_font(l, &lv_font_montserrat_12, 0);
-    lv_obj_set_pos(l, x, y);
-
-    lv_obj_t *bar = lv_bar_create(parent);
-    lv_obj_set_size(bar, w, 12);
-    lv_obj_set_pos(bar, x, y + 14);
-    lv_bar_set_range(bar, 0, 100);
-    lv_obj_set_style_bg_color(bar, lv_color_hex(0x222233), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(bar, lv_color_hex(0x00CC66), LV_PART_INDICATOR);
-    lv_obj_set_style_radius(bar, 4, LV_PART_MAIN);
-    lv_obj_set_style_radius(bar, 4, LV_PART_INDICATOR);
-
-    *lbl_out = lv_label_create(parent);
-    lv_obj_set_style_text_color(*lbl_out, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_set_style_text_font(*lbl_out, &lv_font_montserrat_12, 0);
-    lv_obj_set_pos(*lbl_out, x + w + 8, y + 12);
-    lv_label_set_text(*lbl_out, "---");
-
-    return bar;
-}
-
-/* ── UDP listener task for PC stats ─────────────────────────── */
-static void pc_monitor_udp_task(void *arg)
-{
-    (void)arg;
-    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (sock < 0) {
-        ESP_LOGE(TAG, "PC monitor: socket failed");
-        pc_udp_task_handle = NULL;
-        vTaskDelete(NULL);
-        return;
-    }
-
-    struct sockaddr_in addr = {
-        .sin_family      = AF_INET,
-        .sin_port        = htons(PC_MON_UDP_PORT),
-        .sin_addr.s_addr = htonl(INADDR_ANY),
-    };
-
-    if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        ESP_LOGE(TAG, "PC monitor: bind failed");
-        close(sock);
-        pc_udp_task_handle = NULL;
-        vTaskDelete(NULL);
-        return;
-    }
-
-    struct timeval tv = { .tv_sec = 3, .tv_usec = 0 };
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-    char buf[512];
-    ESP_LOGI(TAG, "PC monitor listening on UDP port %d", PC_MON_UDP_PORT);
-
-    while (1) {
-        int len = recv(sock, buf, sizeof(buf) - 1, 0);
-        if (len > 0) {
-            buf[len] = '\0';
-            cJSON *root = cJSON_Parse(buf);
-            if (root) {
-                cJSON *j;
-                if ((j = cJSON_GetObjectItem(root, "cpu")))       pc_cpu_pct   = (float)j->valuedouble;
-                if ((j = cJSON_GetObjectItem(root, "ram_pct")))   pc_ram_pct   = (float)j->valuedouble;
-                if ((j = cJSON_GetObjectItem(root, "ram_used")))  pc_ram_used  = (float)j->valuedouble;
-                if ((j = cJSON_GetObjectItem(root, "ram_total"))) pc_ram_total = (float)j->valuedouble;
-                if ((j = cJSON_GetObjectItem(root, "disk_pct")))  pc_disk_pct  = (float)j->valuedouble;
-                if ((j = cJSON_GetObjectItem(root, "gpu_pct")))   pc_gpu_pct   = (float)j->valuedouble;
-                if ((j = cJSON_GetObjectItem(root, "gpu_temp")))  pc_gpu_temp  = (float)j->valuedouble;
-                pc_last_rx   = esp_timer_get_time();
-                pc_connected = true;
-                cJSON_Delete(root);
-            }
-        }
-        if (pc_connected && (esp_timer_get_time() - pc_last_rx) > 5000000LL) {
-            pc_connected = false;
-        }
-    }
-}
-
-static void open_monitor_overlay(void)
-{
-    lv_obj_t *o = create_overlay_base(0x0A0A14);
-
-    /* Start UDP listener once */
-    if (!pc_udp_task_handle) {
-        xTaskCreate(pc_monitor_udp_task, "pc_mon_udp", 4096, NULL, 5,
-                    &pc_udp_task_handle);
-    }
-
-    /* Title */
-    lv_obj_t *ttl = lv_label_create(o);
-    lv_label_set_text(ttl, LV_SYMBOL_EYE_OPEN " System Monitor");
-    lv_obj_set_style_text_color(ttl, lv_color_hex(0x00CC66), 0);
-    lv_obj_set_style_text_font(ttl, &lv_font_montserrat_14, 0);
-    lv_obj_align(ttl, LV_ALIGN_TOP_MID, 0, 6);
-
-    /* ── Left column: ESP32 ───────────────────────────────── */
-    lv_obj_t *esp_ttl = lv_label_create(o);
-    lv_label_set_text(esp_ttl, "ESP32");
-    lv_obj_set_style_text_color(esp_ttl, lv_color_hex(0x00CC66), 0);
-    lv_obj_set_style_text_font(esp_ttl, &lv_font_montserrat_12, 0);
-    lv_obj_set_pos(esp_ttl, 14, 24);
-
-    mon_heap_bar  = mon_add_bar(o, "Heap",  14, 38, 170, &mon_heap_lbl);
-    mon_psram_bar = mon_add_bar(o, "PSRAM", 14, 72, 170, &mon_psram_lbl);
-
-    mon_uptime_lbl = lv_label_create(o);
-    lv_obj_set_style_text_color(mon_uptime_lbl, lv_color_hex(0xCCCCCC), 0);
-    lv_obj_set_style_text_font(mon_uptime_lbl, &lv_font_montserrat_12, 0);
-    lv_obj_set_pos(mon_uptime_lbl, 14, 106);
-    lv_label_set_text(mon_uptime_lbl, "Up: --:--:--");
-
-    mon_tasks_lbl = lv_label_create(o);
-    lv_obj_set_style_text_color(mon_tasks_lbl, lv_color_hex(0xCCCCCC), 0);
-    lv_obj_set_style_text_font(mon_tasks_lbl, &lv_font_montserrat_12, 0);
-    lv_obj_set_pos(mon_tasks_lbl, 140, 106);
-    lv_label_set_text(mon_tasks_lbl, "Tasks: --");
-
-    mon_wifi_lbl = lv_label_create(o);
-    lv_obj_set_style_text_color(mon_wifi_lbl, lv_color_hex(0xCCCCCC), 0);
-    lv_obj_set_style_text_font(mon_wifi_lbl, &lv_font_montserrat_12, 0);
-    lv_obj_set_pos(mon_wifi_lbl, 14, 122);
-    lv_label_set_text(mon_wifi_lbl, LV_SYMBOL_WIFI " RSSI: --");
-
-    mon_temp_lbl = lv_label_create(o);
-    lv_obj_set_style_text_color(mon_temp_lbl, lv_color_hex(0xCCCCCC), 0);
-    lv_obj_set_style_text_font(mon_temp_lbl, &lv_font_montserrat_12, 0);
-    lv_obj_set_pos(mon_temp_lbl, 160, 122);
-    lv_label_set_text(mon_temp_lbl, "IMU: --");
-
-    /* ── Separator ────────────────────────────────────────── */
-    lv_obj_t *sep = lv_obj_create(o);
-    lv_obj_remove_style_all(sep);
-    lv_obj_set_size(sep, 1, 120);
-    lv_obj_set_pos(sep, 310, 26);
-    lv_obj_set_style_bg_color(sep, lv_color_hex(0x333333), 0);
-    lv_obj_set_style_bg_opa(sep, LV_OPA_COVER, 0);
-
-    /* ── Right column: PC Stats ───────────────────────────── */
-    int rx = 322;
-
-    mon_pc_status_lbl = lv_label_create(o);
-    lv_obj_set_style_text_font(mon_pc_status_lbl, &lv_font_montserrat_12, 0);
-    lv_obj_set_pos(mon_pc_status_lbl, rx, 24);
-    if (pc_connected) {
-        lv_label_set_text(mon_pc_status_lbl, "PC: Connected");
-        lv_obj_set_style_text_color(mon_pc_status_lbl,
-                                    lv_color_hex(0x00FF88), 0);
-    } else {
-        /* Show ESP32 IP so user knows where to point the script */
-        esp_netif_ip_info_t ip_info;
-        esp_netif_t *nif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-        if (nif && esp_netif_get_ip_info(nif, &ip_info) == ESP_OK) {
-            lv_label_set_text_fmt(mon_pc_status_lbl,
-                "PC: Waiting  " IPSTR ":%d",
-                IP2STR(&ip_info.ip), PC_MON_UDP_PORT);
-        } else {
-            lv_label_set_text(mon_pc_status_lbl, "PC: Waiting...");
-        }
-        lv_obj_set_style_text_color(mon_pc_status_lbl,
-                                    lv_color_hex(0xFF8800), 0);
-    }
-
-    mon_pc_cpu_bar = mon_add_bar(o, "CPU", rx, 38, 180, &mon_pc_cpu_lbl);
-    mon_pc_ram_bar = mon_add_bar(o, "RAM", rx, 72, 180, &mon_pc_ram_lbl);
-
-    mon_pc_disk_lbl = lv_label_create(o);
-    lv_obj_set_style_text_color(mon_pc_disk_lbl, lv_color_hex(0xCCCCCC), 0);
-    lv_obj_set_style_text_font(mon_pc_disk_lbl, &lv_font_montserrat_12, 0);
-    lv_obj_set_pos(mon_pc_disk_lbl, rx, 106);
-    lv_label_set_text(mon_pc_disk_lbl, "Disk: --");
-
-    mon_pc_gpu_lbl = lv_label_create(o);
-    lv_obj_set_style_text_color(mon_pc_gpu_lbl, lv_color_hex(0xCCCCCC), 0);
-    lv_obj_set_style_text_font(mon_pc_gpu_lbl, &lv_font_montserrat_12, 0);
-    lv_obj_set_pos(mon_pc_gpu_lbl, rx, 122);
-    lv_label_set_text(mon_pc_gpu_lbl, "GPU: --");
-
-    /* ── Bottom: min free heap ────────────────────────────── */
-    lv_obj_t *mfh = lv_label_create(o);
-    lv_obj_set_style_text_color(mfh, lv_color_hex(0x666666), 0);
-    lv_obj_set_style_text_font(mfh, &lv_font_montserrat_12, 0);
-    lv_obj_align(mfh, LV_ALIGN_BOTTOM_MID, 0, -4);
-    lv_label_set_text_fmt(mfh, "Min heap: %luK  |  Min PSRAM: %luK",
-        (unsigned long)(esp_get_minimum_free_heap_size() / 1024),
-        (unsigned long)(heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM) / 1024));
-
-    s_monitor_active = true;
-    monitor_update_tick();    /* fill in initial values */
-}
-
-static void monitor_update_tick(void)
-{
-    if (!s_monitor_active) return;
-
-    /* ── ESP32 stats ──────────────────────────────────────── */
-
-    /* Internal heap usage */
-    size_t total_int  = heap_caps_get_total_size(MALLOC_CAP_INTERNAL);
-    size_t free_int   = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    int pct_int = (total_int > 0) ? (int)((total_int - free_int) * 100 / total_int) : 0;
-    if (mon_heap_bar) lv_bar_set_value(mon_heap_bar, pct_int, LV_ANIM_ON);
-    if (mon_heap_lbl) lv_label_set_text_fmt(mon_heap_lbl, "%luK/%luK",
-        (unsigned long)((total_int - free_int) / 1024),
-        (unsigned long)(total_int / 1024));
-    if (mon_heap_bar) {
-        uint32_t col = pct_int < 60 ? 0x00CC66 : (pct_int < 85 ? 0xFFCC00 : 0xFF4444);
-        lv_obj_set_style_bg_color(mon_heap_bar, lv_color_hex(col), LV_PART_INDICATOR);
-    }
-
-    /* PSRAM usage */
-    size_t total_ps = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
-    size_t free_ps  = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-    int pct_ps = (total_ps > 0) ? (int)((total_ps - free_ps) * 100 / total_ps) : 0;
-    if (mon_psram_bar) lv_bar_set_value(mon_psram_bar, pct_ps, LV_ANIM_ON);
-    if (mon_psram_lbl) lv_label_set_text_fmt(mon_psram_lbl, "%luK/%luK",
-        (unsigned long)((total_ps - free_ps) / 1024),
-        (unsigned long)(total_ps / 1024));
-    if (mon_psram_bar) {
-        uint32_t col = pct_ps < 60 ? 0x00CC66 : (pct_ps < 85 ? 0xFFCC00 : 0xFF4444);
-        lv_obj_set_style_bg_color(mon_psram_bar, lv_color_hex(col), LV_PART_INDICATOR);
-    }
-
-    /* Uptime */
-    int64_t us = esp_timer_get_time();
-    int secs = (int)(us / 1000000);
-    int h = secs / 3600, m = (secs % 3600) / 60, s = secs % 60;
-    if (mon_uptime_lbl)
-        lv_label_set_text_fmt(mon_uptime_lbl, "Up: %02d:%02d:%02d", h, m, s);
-
-    /* Task count */
-    if (mon_tasks_lbl)
-        lv_label_set_text_fmt(mon_tasks_lbl, "Tasks: %lu",
-                              (unsigned long)uxTaskGetNumberOfTasks());
-
-    /* WiFi RSSI */
-    if (mon_wifi_lbl) {
-        if (wifi_is_connected()) {
-            wifi_ap_record_t ap;
-            if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
-                lv_label_set_text_fmt(mon_wifi_lbl,
-                    LV_SYMBOL_WIFI " %d dBm", ap.rssi);
-                uint32_t col = ap.rssi > -50 ? 0x00FF88 :
-                               (ap.rssi > -70 ? 0xFFCC00 : 0xFF4444);
-                lv_obj_set_style_text_color(mon_wifi_lbl, lv_color_hex(col), 0);
-            }
-        } else {
-            lv_label_set_text(mon_wifi_lbl, LV_SYMBOL_WIFI " N/A");
-            lv_obj_set_style_text_color(mon_wifi_lbl, lv_color_hex(0xFF4444), 0);
-        }
-    }
-
-    /* IMU chip temperature */
-    if (mon_temp_lbl) {
-        float t = read_imu_temp();
-        lv_label_set_text_fmt(mon_temp_lbl, "IMU: %.1f\xC2\xB0""C", t);
-    }
-
-    /* ── PC stats ─────────────────────────────────────────── */
-    if (mon_pc_status_lbl) {
-        if (pc_connected) {
-            lv_label_set_text(mon_pc_status_lbl, "PC: Connected");
-            lv_obj_set_style_text_color(mon_pc_status_lbl,
-                                        lv_color_hex(0x00FF88), 0);
-        } else if (pc_last_rx > 0) {
-            lv_label_set_text(mon_pc_status_lbl, "PC: Disconnected");
-            lv_obj_set_style_text_color(mon_pc_status_lbl,
-                                        lv_color_hex(0xFF4444), 0);
-        }
-    }
-
-    if (pc_connected) {
-        if (mon_pc_cpu_bar) {
-            int cpu = (int)pc_cpu_pct;
-            lv_bar_set_value(mon_pc_cpu_bar, cpu, LV_ANIM_ON);
-            uint32_t col = cpu < 60 ? 0x00CC66 : (cpu < 85 ? 0xFFCC00 : 0xFF4444);
-            lv_obj_set_style_bg_color(mon_pc_cpu_bar, lv_color_hex(col),
-                                      LV_PART_INDICATOR);
-        }
-        if (mon_pc_cpu_lbl)
-            lv_label_set_text_fmt(mon_pc_cpu_lbl, "%.0f%%", pc_cpu_pct);
-
-        if (mon_pc_ram_bar) {
-            int ram = (int)pc_ram_pct;
-            lv_bar_set_value(mon_pc_ram_bar, ram, LV_ANIM_ON);
-            uint32_t col = ram < 60 ? 0x00CC66 : (ram < 85 ? 0xFFCC00 : 0xFF4444);
-            lv_obj_set_style_bg_color(mon_pc_ram_bar, lv_color_hex(col),
-                                      LV_PART_INDICATOR);
-        }
-        if (mon_pc_ram_lbl) {
-            if (pc_ram_total > 0)
-                lv_label_set_text_fmt(mon_pc_ram_lbl, "%.1f/%.0fG",
-                    pc_ram_used / 1024.0f, pc_ram_total / 1024.0f);
-            else
-                lv_label_set_text_fmt(mon_pc_ram_lbl, "%.0f%%", pc_ram_pct);
-        }
-        if (mon_pc_disk_lbl)
-            lv_label_set_text_fmt(mon_pc_disk_lbl, "Disk: %.0f%%", pc_disk_pct);
-        if (mon_pc_gpu_lbl) {
-            if (pc_gpu_temp > 0)
-                lv_label_set_text_fmt(mon_pc_gpu_lbl,
-                    "GPU: %.0f%%  %.0f\xC2\xB0""C", pc_gpu_pct, pc_gpu_temp);
-            else if (pc_gpu_pct > 0)
-                lv_label_set_text_fmt(mon_pc_gpu_lbl, "GPU: %.0f%%", pc_gpu_pct);
-        }
-    }
-}
-
 /* ── Card tap callback ────────────────────────────────────── */
+/* Pending overlay request from settings screen */
+static volatile int s_pending_overlay = -1;   /* -1=none, 0=BLE, 1=WiFi */
+
+void screen_menu_request_wifi(void) { s_pending_overlay = 1; }
+void screen_menu_request_ble(void)  { s_pending_overlay = 0; }
+
 static void card_click_cb(lv_event_t *e)
 {
     size_t idx = (size_t)(uintptr_t)lv_event_get_user_data(e);
     ESP_LOGI(TAG, "App tapped: %s (#%d)", apps[idx].name, (int)idx);
     switch (idx) {
-        case 0: open_ble_overlay();  break;
-        case 1: open_wifi_overlay(); break;
-        case 2: open_led_overlay();  break;
-        case 3: open_ai_overlay();   break;
-        case 4: game_maze_open(scr);  break;
-        case 5: music_player_open(scr); break;
-        case 6: open_monitor_overlay(); break;
+        case 0: open_led_overlay();     break;
+        case 1: open_ai_overlay();      break;
+        case 2: game_maze_open(scr);    break;
+        case 3: music_player_open(scr); break;
+        case 4: app_manager_set_mode(MODE_TAMAFI); break;
+        case 5: macropad_open(scr);     break;
+        case 6: app_manager_set_mode(MODE_SETTINGS); break;
         default: break;
     }
 }
@@ -1243,7 +880,7 @@ static void card_click_cb(lv_event_t *e)
 /* ── Styles ───────────────────────────────────────────────── */
 static lv_style_t style_bg, style_card, style_icon, style_name;
 static lv_style_t style_dot_active, style_dot_inactive;
-static lv_obj_t *mode_dot[3];
+static lv_obj_t *mode_dot[2];
 
 static void init_styles(void)
 {
@@ -1286,6 +923,14 @@ void screen_menu_update(void)
 {
     if (!scr) return;
 
+    /* Auto-open overlay requested by settings screen */
+    if (s_pending_overlay >= 0) {
+        int p = s_pending_overlay;
+        s_pending_overlay = -1;
+        if (p == 0) open_ble_overlay();
+        else if (p == 1) open_wifi_overlay();
+    }
+
     /* WiFi scan results */
     if (!s_wifi_scanning && wifi_list && s_wifi_ap_count > 0) {
         static uint16_t prev_wifi_count = 0xFFFF;
@@ -1314,10 +959,7 @@ void screen_menu_update(void)
         music_player_update();
     }
 
-    /* System monitor tick */
-    if (s_monitor_active) {
-        monitor_update_tick();
-    }
+    /* Macropad — nothing to tick, but close check */
 
     /* AI response ready */
     if (ai_response_ready && ai_response_lbl) {
@@ -1379,10 +1021,10 @@ void screen_menu_create(void)
                             (void *)(uintptr_t)i);
     }
 
-    /* Page dots (3) */
+    /* Page dots (2) */
     lv_obj_t *dot_row = lv_obj_create(scr);
     lv_obj_remove_style_all(dot_row);
-    lv_obj_set_size(dot_row, 60, 12);
+    lv_obj_set_size(dot_row, 40, 12);
     lv_obj_align(dot_row, LV_ALIGN_BOTTOM_MID, 0, -4);
     lv_obj_set_flex_flow(dot_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(dot_row, LV_FLEX_ALIGN_CENTER,
@@ -1390,7 +1032,7 @@ void screen_menu_create(void)
     lv_obj_set_style_pad_column(dot_row, 8, 0);
     lv_obj_clear_flag(dot_row, LV_OBJ_FLAG_SCROLLABLE);
 
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 2; i++) {
         mode_dot[i] = lv_obj_create(dot_row);
         lv_obj_remove_style_all(mode_dot[i]);
         if (i == 1)
@@ -1409,6 +1051,7 @@ void screen_menu_destroy(void)
     if (scr) {
         game_maze_close();
         music_player_close();
+        macropad_close();
         overlay = NULL; led_btn = NULL; led_btn_lbl = NULL; led_on = false;
         wifi_list = NULL; wifi_status_lbl = NULL;
         ble_list = NULL; ble_status_lbl = NULL;
