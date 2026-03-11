@@ -20,6 +20,16 @@ void wifi_time_init(void);
  */
 bool wifi_is_connected(void);
 
+/**
+ * Returns the SSID currently in use (from NVS or hw_config default).
+ */
+const char *wifi_get_current_ssid(void);
+
+/**
+ * Reset the WiFi retry counter (call after provisioning).
+ */
+void wifi_reset_retry(void);
+
 #ifdef __cplusplus
 }
 #endif

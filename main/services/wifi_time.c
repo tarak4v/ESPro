@@ -4,6 +4,7 @@
  */
 
 #include "wifi_time.h"
+#include "wifi_prov.h"
 #include "hw_config.h"
 #include "i2c_bsp.h"
 
@@ -33,6 +34,7 @@ static int s_retry_num = 0;
 #define WIFI_MAX_RETRY  10
 
 static volatile bool s_wifi_connected = false;
+static char s_current_ssid[33] = WIFI_SSID;
 
 /* ── BCD helpers (same as screen_clock, kept local) ───────── */
 static inline uint8_t dec2bcd(uint8_t v) { return ((v / 10) << 4) | (v % 10); }
@@ -129,19 +131,32 @@ void wifi_time_init(void)
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, &inst_got_ip));
 
-    /* Configure STA */
+    /* Configure STA — prefer NVS-stored credentials, fall back to defaults */
     wifi_config_t wifi_cfg = {
         .sta = {
-            .ssid     = WIFI_SSID,
-            .password = WIFI_PASS,
             .threshold.authmode = WIFI_AUTH_WPA2_PSK,
         },
     };
+
+    char nvs_ssid[33] = "", nvs_pass[65] = "";
+    if (wifi_prov_load_creds(nvs_ssid, sizeof(nvs_ssid),
+                             nvs_pass, sizeof(nvs_pass))) {
+        strncpy((char *)wifi_cfg.sta.ssid, nvs_ssid, sizeof(wifi_cfg.sta.ssid) - 1);
+        strncpy((char *)wifi_cfg.sta.password, nvs_pass, sizeof(wifi_cfg.sta.password) - 1);
+        strncpy(s_current_ssid, nvs_ssid, sizeof(s_current_ssid) - 1);
+    } else {
+        strncpy((char *)wifi_cfg.sta.ssid, WIFI_SSID, sizeof(wifi_cfg.sta.ssid) - 1);
+        strncpy((char *)wifi_cfg.sta.password, WIFI_PASS, sizeof(wifi_cfg.sta.password) - 1);
+        strncpy(s_current_ssid, WIFI_SSID, sizeof(s_current_ssid) - 1);
+    }
+    if (!wifi_cfg.sta.password[0])
+        wifi_cfg.sta.threshold.authmode = WIFI_AUTH_OPEN;
+
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_LOGI(TAG, "WiFi STA started, connecting to \"%s\"...", WIFI_SSID);
+    ESP_LOGI(TAG, "WiFi STA started, connecting to \"%s\"...", s_current_ssid);
 
     /* Wait for connection (max ~20 s) */
     EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
@@ -177,4 +192,14 @@ void wifi_time_init(void)
 bool wifi_is_connected(void)
 {
     return s_wifi_connected;
+}
+
+const char *wifi_get_current_ssid(void)
+{
+    return s_current_ssid;
+}
+
+void wifi_reset_retry(void)
+{
+    s_retry_num = 0;
 }

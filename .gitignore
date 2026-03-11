@@ -1,0 +1,18 @@
+# Build output
+build/
+
+# Managed components (fetched by idf.py)
+managed_components/
+
+# IDE / editor
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Backup files
+*.bak

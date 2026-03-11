@@ -18,6 +18,7 @@ typedef enum {
     MODE_SWIPE_COUNT,          /* number of modes in swipe cycle */
     MODE_SETTINGS = MODE_SWIPE_COUNT,
     MODE_TAMAFI,
+    MODE_WIFI_CFG,
     MODE_COUNT
 } app_mode_t;
 

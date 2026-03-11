@@ -41,6 +41,7 @@
 #include "weather.h"
 #include "sd_log.h"
 #include "macropad.h"
+#include "mic_input.h"
 
 static const char *TAG = "main";
 
@@ -410,6 +411,9 @@ void app_main(void)
 
     /* Load TamaFi pet state from NVS */
     tamafi_load_from_nvs();
+
+    /* Initialise microphone (ES7210 ADC) */
+    mic_init();
 
     /* ── Touch input device ───────────────────────────────── */
     static lv_indev_drv_t indev_drv;

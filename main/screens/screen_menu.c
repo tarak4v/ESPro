@@ -7,6 +7,7 @@
 #include "screen_menu.h"
 #include "app_manager.h"
 #include "hw_config.h"
+#include "screen_settings.h"
 #include "wifi_time.h"
 #include "sd_log.h"
 #include "lvgl.h"
@@ -85,7 +86,7 @@ static const menu_entry_t apps[] = {
     { "AI",       LV_SYMBOL_EDIT,      0x6A1B9A },
     { "Game",     LV_SYMBOL_PLAY,      0x880E4F },
     { "Music",    LV_SYMBOL_AUDIO,     0x7B6800 },
-    { "Pet",      LV_SYMBOL_HOME,      0x2E7D32 },
+    { "Buddy",    LV_SYMBOL_EYE_OPEN,  0x006064 },
     { "Macropad", LV_SYMBOL_KEYBOARD,  0x37474F },
     { "Settings", LV_SYMBOL_SETTINGS,  0x546E7A },
 };
@@ -226,7 +227,7 @@ static void wifi_show_password_entry(void)
     lv_obj_remove_style_all(wifi_kb_overlay);
     lv_obj_set_size(wifi_kb_overlay, LCD_H_RES, LCD_V_RES);
     lv_obj_align(wifi_kb_overlay, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_set_style_bg_color(wifi_kb_overlay, lv_color_hex(0x0A0A14), 0);
+    lv_obj_set_style_bg_color(wifi_kb_overlay, lv_color_hex(th_bg), 0);
     lv_obj_set_style_bg_opa(wifi_kb_overlay, LV_OPA_COVER, 0);
     lv_obj_clear_flag(wifi_kb_overlay, LV_OBJ_FLAG_SCROLLABLE);
 
@@ -371,7 +372,7 @@ static void wifi_scan_btn_cb(lv_event_t *e)
 
 static void open_wifi_overlay(void)
 {
-    lv_obj_t *p = create_overlay_base(0x0A0A14);
+    lv_obj_t *p = create_overlay_base(th_bg);
 
     lv_obj_t *title = lv_label_create(p);
     lv_label_set_text(title, LV_SYMBOL_WIFI "  WiFi");
@@ -549,7 +550,7 @@ static void ble_scan_btn_cb(lv_event_t *e)
 
 static void open_ble_overlay(void)
 {
-    lv_obj_t *p = create_overlay_base(0x0A0A14);
+    lv_obj_t *p = create_overlay_base(th_bg);
 
     lv_obj_t *title = lv_label_create(p);
     lv_label_set_text(title, LV_SYMBOL_BLUETOOTH "  BLE");
@@ -716,7 +717,7 @@ static const char *ai_prompts[] = {
 
 static void open_ai_overlay(void)
 {
-    lv_obj_t *p = create_overlay_base(0x0A0A14);
+    lv_obj_t *p = create_overlay_base(th_bg);
 
     lv_obj_t *title = lv_label_create(p);
     lv_label_set_text(title, LV_SYMBOL_EDIT "  AI Assist (HuggingFace)");
@@ -885,7 +886,7 @@ static lv_obj_t *mode_dot[2];
 static void init_styles(void)
 {
     lv_style_init(&style_bg);
-    lv_style_set_bg_color(&style_bg, lv_color_hex(0x0A0A0A));
+    lv_style_set_bg_color(&style_bg, lv_color_hex(th_bg));
     lv_style_set_bg_opa(&style_bg, LV_OPA_COVER);
 
     lv_style_init(&style_card);
@@ -911,7 +912,7 @@ static void init_styles(void)
     lv_style_set_height(&style_dot_active, 8);
 
     lv_style_init(&style_dot_inactive);
-    lv_style_set_bg_color(&style_dot_inactive, lv_color_hex(0x333333));
+    lv_style_set_bg_color(&style_dot_inactive, lv_color_hex(th_btn));
     lv_style_set_bg_opa(&style_dot_inactive, LV_OPA_COVER);
     lv_style_set_radius(&style_dot_inactive, LV_RADIUS_CIRCLE);
     lv_style_set_width(&style_dot_inactive, 6);

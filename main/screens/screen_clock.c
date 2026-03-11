@@ -37,6 +37,10 @@ static lv_obj_t *weather_temp   = NULL;
 static lv_obj_t *weather_desc   = NULL;
 static lv_obj_t *weather_loc    = NULL;
 
+/* Flip clock digit labels (4 digit cards: HH MM) */
+static lv_obj_t *flip_digit[4]  = {NULL};
+static lv_obj_t *flip_colon     = NULL;
+
 static const char *weekday_names[] = {
     "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"
 };
@@ -116,19 +120,21 @@ static lv_style_t style_dot_active, style_dot_inactive;
 static void init_styles(void)
 {
     lv_style_init(&style_bg);
-    lv_style_set_bg_color(&style_bg, lv_color_hex(0x0A0A14));
+    lv_style_set_bg_color(&style_bg, lv_color_hex(th_bg));
     lv_style_set_bg_opa(&style_bg, LV_OPA_COVER);
 
     /* Frosted-glass panel */
     lv_style_init(&style_glass);
-    lv_style_set_bg_color(&style_glass, lv_color_hex(0x1A1A2E));
-    lv_style_set_bg_opa(&style_glass, LV_OPA_80);
-    lv_style_set_border_color(&style_glass, lv_color_hex(0x333355));
+    lv_style_set_bg_color(&style_glass, lv_color_hex(th_card));
+    lv_style_set_bg_opa(&style_glass, g_theme_dark ? LV_OPA_80 : LV_OPA_COVER);
+    lv_style_set_border_color(&style_glass,
+                              lv_color_hex(g_theme_dark ? 0x333355 : 0xCCCCDD));
     lv_style_set_border_width(&style_glass, 1);
     lv_style_set_border_opa(&style_glass, LV_OPA_60);
     lv_style_set_radius(&style_glass, 16);
-    lv_style_set_shadow_color(&style_glass, lv_color_hex(0x000000));
-    lv_style_set_shadow_width(&style_glass, 20);
+    lv_style_set_shadow_color(&style_glass,
+                              lv_color_hex(g_theme_dark ? 0x000000 : 0x888888));
+    lv_style_set_shadow_width(&style_glass, g_theme_dark ? 20 : 8);
     lv_style_set_shadow_opa(&style_glass, LV_OPA_40);
     lv_style_set_pad_all(&style_glass, 12);
 
@@ -147,6 +153,41 @@ static void init_styles(void)
     lv_style_set_height(&style_dot_inactive, 6);
 }
 
+/* ── Helper: create one flip-digit card ───────────────────── */
+static lv_obj_t *create_flip_card(lv_obj_t *parent, int x, int y)
+{
+    uint32_t card_bg = g_theme_dark ? 0x1C1C2E : 0xEEEEF2;
+    uint32_t line_c  = g_theme_dark ? 0x333344 : 0xCCCCDD;
+
+    lv_obj_t *card = lv_obj_create(parent);
+    lv_obj_remove_style_all(card);
+    lv_obj_set_size(card, 55, 80);
+    lv_obj_set_pos(card, x, y);
+    lv_obj_set_style_bg_color(card, lv_color_hex(card_bg), 0);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(card, 8, 0);
+    lv_obj_set_style_border_width(card, 1, 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(line_c), 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    /* Horizontal divider line at centre */
+    lv_obj_t *line = lv_obj_create(card);
+    lv_obj_remove_style_all(line);
+    lv_obj_set_size(line, 55, 1);
+    lv_obj_set_style_bg_color(line, lv_color_hex(line_c), 0);
+    lv_obj_set_style_bg_opa(line, LV_OPA_COVER, 0);
+    lv_obj_align(line, LV_ALIGN_CENTER, 0, 0);
+
+    /* Digit label */
+    lv_obj_t *lbl = lv_label_create(card);
+    lv_label_set_text(lbl, "0");
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(th_text), 0);
+    lv_obj_center(lbl);
+
+    return lbl;  /* return the LABEL for updating */
+}
+
 /* ── Create ───────────────────────────────────────────────── */
 void screen_clock_create(void)
 {
@@ -156,17 +197,26 @@ void screen_clock_create(void)
     lv_obj_add_style(scr, &style_bg, 0);
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
+    /* Theme-aware text colours */
+    uint32_t c_time   = g_theme_dark ? 0xEEEEFF : 0x1A1A2E;
+    uint32_t c_ampm   = g_theme_dark ? 0x6688AA : 0x5577AA;
+    uint32_t c_date   = g_theme_dark ? 0x7788AA : 0x556688;
+    uint32_t c_wkday  = g_theme_dark ? 0x00BBDD : 0x0088AA;
+    uint32_t c_wdesc  = g_theme_dark ? 0x8899BB : 0x5566AA;
+    uint32_t c_wloc   = g_theme_dark ? 0x556688 : 0x445577;
+    uint32_t c_ico_df = g_theme_dark ? 0x444466 : 0xAAAACC;
+
     /* ── Status bar (WiFi + BT icons, top-left) ──── */
     wifi_icon = lv_label_create(scr);
     lv_label_set_text(wifi_icon, LV_SYMBOL_WIFI);
     lv_obj_set_style_text_font(wifi_icon, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(wifi_icon, lv_color_hex(0x444466), 0);
+    lv_obj_set_style_text_color(wifi_icon, lv_color_hex(c_ico_df), 0);
     lv_obj_set_pos(wifi_icon, 10, 4);
 
     bt_icon = lv_label_create(scr);
     lv_label_set_text(bt_icon, LV_SYMBOL_BLUETOOTH);
     lv_obj_set_style_text_font(bt_icon, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(bt_icon, lv_color_hex(0x444466), 0);
+    lv_obj_set_style_text_color(bt_icon, lv_color_hex(c_ico_df), 0);
     lv_obj_set_pos(bt_icon, 28, 4);
 
     /* ════════════ LEFT GLASS PANEL — Clock & Date ═══════════ */
@@ -177,34 +227,82 @@ void screen_clock_create(void)
     lv_obj_set_pos(left_panel, 14, 18);
     lv_obj_clear_flag(left_panel, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* Time (large) */
-    time_label = lv_label_create(left_panel);
-    lv_label_set_text(time_label, "12:00");
-    lv_obj_set_style_text_font(time_label, &lv_font_montserrat_48, 0);
-    lv_obj_set_style_text_color(time_label, lv_color_hex(0xEEEEFF), 0);
-    lv_obj_set_style_text_letter_space(time_label, 4, 0);
-    lv_obj_align(time_label, LV_ALIGN_CENTER, -14, -18);
+    if (g_clock_flip) {
+        /* ── FLIP CLOCK: 4 individual digit cards ──── */
+        /*  Layout inside 300×140 panel (12px pad → 276×116 usable)
+         *  Card: 55×80 each.  HH[2px]HH : MM[2px]MM
+         *  Total: 55+2+55 + 14 + 55+2+55 = 238 → starts at (276-238)/2 = 19 */
+        int base_x = 19;
+        int base_y = 4;  /* within panel padding */
+        flip_digit[0] = create_flip_card(left_panel, base_x,      base_y);
+        flip_digit[1] = create_flip_card(left_panel, base_x + 57, base_y);
 
-    /* AM/PM */
-    ampm_label = lv_label_create(left_panel);
-    lv_label_set_text(ampm_label, "AM");
-    lv_obj_set_style_text_font(ampm_label, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(ampm_label, lv_color_hex(0x6688AA), 0);
-    lv_obj_align_to(ampm_label, time_label, LV_ALIGN_OUT_RIGHT_BOTTOM, 6, -4);
+        /* Colon */
+        flip_colon = lv_label_create(left_panel);
+        lv_label_set_text(flip_colon, ":");
+        lv_obj_set_style_text_font(flip_colon, &lv_font_montserrat_48, 0);
+        lv_obj_set_style_text_color(flip_colon, lv_color_hex(c_time), 0);
+        lv_obj_set_pos(flip_colon, base_x + 117, base_y + 14);
 
-    /* Date */
-    date_label = lv_label_create(left_panel);
-    lv_label_set_text(date_label, "01-01-2025");
-    lv_obj_set_style_text_font(date_label, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(date_label, lv_color_hex(0x7788AA), 0);
-    lv_obj_align(date_label, LV_ALIGN_CENTER, 0, 26);
+        flip_digit[2] = create_flip_card(left_panel, base_x + 138, base_y);
+        flip_digit[3] = create_flip_card(left_panel, base_x + 195, base_y);
 
-    /* Weekday */
-    weekday_label = lv_label_create(left_panel);
-    lv_label_set_text(weekday_label, "SAT");
-    lv_obj_set_style_text_font(weekday_label, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(weekday_label, lv_color_hex(0x00BBDD), 0);
-    lv_obj_align(weekday_label, LV_ALIGN_CENTER, 0, 44);
+        /* AM/PM (right of last card) */
+        ampm_label = lv_label_create(left_panel);
+        lv_label_set_text(ampm_label, "");
+        lv_obj_set_style_text_font(ampm_label, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(ampm_label, lv_color_hex(c_ampm), 0);
+        lv_obj_set_pos(ampm_label, base_x + 202, base_y + 82);
+
+        /* Date below flip cards */
+        date_label = lv_label_create(left_panel);
+        lv_label_set_text(date_label, "01-01-2025");
+        lv_obj_set_style_text_font(date_label, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(date_label, lv_color_hex(c_date), 0);
+        lv_obj_align(date_label, LV_ALIGN_BOTTOM_MID, -20, -2);
+
+        /* Weekday */
+        weekday_label = lv_label_create(left_panel);
+        lv_label_set_text(weekday_label, "SAT");
+        lv_obj_set_style_text_font(weekday_label, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(weekday_label, lv_color_hex(c_wkday), 0);
+        lv_obj_align(weekday_label, LV_ALIGN_BOTTOM_MID, 60, -2);
+
+        time_label = NULL;   /* not used in flip mode */
+    } else {
+        /* ── DIGITAL CLOCK (original style) ──── */
+        for (int i = 0; i < 4; i++) flip_digit[i] = NULL;
+        flip_colon = NULL;
+
+        /* Time (large) */
+        time_label = lv_label_create(left_panel);
+        lv_label_set_text(time_label, "12:00");
+        lv_obj_set_style_text_font(time_label, &lv_font_montserrat_48, 0);
+        lv_obj_set_style_text_color(time_label, lv_color_hex(c_time), 0);
+        lv_obj_set_style_text_letter_space(time_label, 4, 0);
+        lv_obj_align(time_label, LV_ALIGN_CENTER, -14, -18);
+
+        /* AM/PM */
+        ampm_label = lv_label_create(left_panel);
+        lv_label_set_text(ampm_label, "AM");
+        lv_obj_set_style_text_font(ampm_label, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(ampm_label, lv_color_hex(c_ampm), 0);
+        lv_obj_align_to(ampm_label, time_label, LV_ALIGN_OUT_RIGHT_BOTTOM, 6, -4);
+
+        /* Date */
+        date_label = lv_label_create(left_panel);
+        lv_label_set_text(date_label, "01-01-2025");
+        lv_obj_set_style_text_font(date_label, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(date_label, lv_color_hex(c_date), 0);
+        lv_obj_align(date_label, LV_ALIGN_CENTER, 0, 26);
+
+        /* Weekday */
+        weekday_label = lv_label_create(left_panel);
+        lv_label_set_text(weekday_label, "SAT");
+        lv_obj_set_style_text_font(weekday_label, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(weekday_label, lv_color_hex(c_wkday), 0);
+        lv_obj_align(weekday_label, LV_ALIGN_CENTER, 0, 44);
+    }
 
     /* ════════════ RIGHT GLASS PANEL — Weather ════════════════ */
     lv_obj_t *right_panel = lv_obj_create(scr);
@@ -225,14 +323,14 @@ void screen_clock_create(void)
     weather_desc = lv_label_create(right_panel);
     lv_label_set_text(weather_desc, "---");
     lv_obj_set_style_text_font(weather_desc, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(weather_desc, lv_color_hex(0x8899BB), 0);
+    lv_obj_set_style_text_color(weather_desc, lv_color_hex(c_wdesc), 0);
     lv_obj_align(weather_desc, LV_ALIGN_CENTER, 0, 16);
 
     /* Location */
     weather_loc = lv_label_create(right_panel);
     lv_label_set_text(weather_loc, LV_SYMBOL_GPS " " WEATHER_CITY);
     lv_obj_set_style_text_font(weather_loc, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(weather_loc, lv_color_hex(0x556688), 0);
+    lv_obj_set_style_text_color(weather_loc, lv_color_hex(c_wloc), 0);
     lv_obj_align(weather_loc, LV_ALIGN_CENTER, 0, 38);
 
     /* ── Page indicator dots (2) ──── */
@@ -257,7 +355,9 @@ void screen_clock_create(void)
 
     lv_disp_load_scr(scr);
     screen_clock_update();
-    ESP_LOGI(TAG, "Clock screen created (glassy theme)");
+    ESP_LOGI(TAG, "Clock screen created (%s, %s theme)",
+             g_clock_flip ? "flip" : "digital",
+             g_theme_dark ? "dark" : "light");
 }
 
 /* ── Destroy ──────────────────────────────────────────────── */
@@ -271,6 +371,8 @@ void screen_clock_destroy(void)
         date_label    = NULL;
         weekday_label = NULL;
         for (int i = 0; i < 2; i++) mode_dot[i] = NULL;
+        for (int i = 0; i < 4; i++) flip_digit[i] = NULL;
+        flip_colon    = NULL;
         wifi_icon     = NULL;
         bt_icon       = NULL;
         weather_temp  = NULL;
@@ -299,8 +401,17 @@ void screen_clock_update(void)
         snprintf(buf, sizeof(buf), "%2d:%02d", h12, t.min);
         if (ampm_label) lv_label_set_text(ampm_label, ampm);
     }
-    if (time_label)
+    if (flip_digit[0]) {
+        /* Flip clock: update individual digit labels */
+        char d[2] = {0, 0};
+        for (int i = 0; i < 4; i++) {
+            int bi = (i < 2) ? i : i + 1;  /* skip ':' at index 2 */
+            d[0] = buf[bi];
+            lv_label_set_text(flip_digit[i], d);
+        }
+    } else if (time_label) {
         lv_label_set_text(time_label, buf);
+    }
 
     if (date_label)
         lv_label_set_text_fmt(date_label, "%02d-%02d-%04d",
