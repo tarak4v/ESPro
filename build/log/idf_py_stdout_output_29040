@@ -1,8 +1,0 @@
-Command: ninja all
-[1/4] C:\WINDOWS\system32\cmd.exe /C "cd /D D:\tarak\SS_Smallstart_VS\build\esp-idf\esptool_py && C:\Espressif\python_env\idf5.5_py3.11_env\Scripts\python.exe C:/Espressif/frameworks/esp-idf-v5.5.1/components/partition_table/check_sizes.py --offset 0x8000 partition --type app D:/tarak/SS_Smallstart_VS/build/partition_table/partition-table.bin D:/tarak/SS_Smallstart_VS/build/SS_Smallstart.bin"
-SS_Smallstart.bin binary size 0x1a9170 bytes. Smallest app partition is 0x800000 bytes. 0x656e90 bytes (79%) free.
-[2/4] Performing build step for 'bootloader'
-[1/1] C:\WINDOWS\system32\cmd.exe /C "cd /D D:\tarak\SS_Smallstart_VS\build\bootloader\esp-idf\esptool_py && C:\Espressif\python_env\idf5.5_py3.11_env\Scripts\python.exe C:/Espressif/frameworks/esp-idf-v5.5.1/components/partition_table/check_sizes.py --offset 0x8000 bootloader 0x0 D:/tarak/SS_Smallstart_VS/build/bootloader/bootloader.bin"
-Bootloader binary size 0x5240 bytes. 0x2dc0 bytes (36%) free.
-[3/4] No install step for 'bootloader'
-[4/4] Completed 'bootloader'

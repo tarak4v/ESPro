@@ -6,3 +6,4 @@ dependencies:
   espressif/esp_io_expander_tca9554: ^2.0.1
   lvgl/lvgl: ^8.4.0
   espressif/esp_codec_dev: ^1.5.4
+  espressif/esp_audio_codec: ^2.4.1

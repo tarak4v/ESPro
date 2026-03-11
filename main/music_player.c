@@ -1,11 +1,8 @@
 /**
  * @file music_player.c
- * @brief JioSaavn music player — streams curated Indian playlists.
+ * @brief Music player using JioSaavn search API + DES-ECB URL decryption.
  *
- * Pipeline:  JioSaavn API → decrypt URL → HTTP stream → MP3 decode → I2S
- *
- * Categories: Bollywood Latest, Bollywood 90s, Bhajans, Dance Mix, Lofi.
- * Songs fetched via JioSaavn search API, URLs decrypted (DES-ECB), played as MP3.
+ * Pipeline:  JioSaavn API → decrypt URL → HTTPS MP3 stream → minimp3 → I2S
  */
 
 #include "music_player.h"
@@ -27,9 +24,6 @@
 #include <stdlib.h>
 
 #include "minimp3.h"
-#include "esp_audio_simple_dec.h"
-#include "esp_audio_simple_dec_default.h"
-#include "esp_audio_dec_default.h"
 
 /* esp_codec_dev — ES8311 driver */
 #include "esp_codec_dev.h"
@@ -44,21 +38,11 @@
 static const char *TAG = "music";
 
 /* ================================================================
- *  JioSaavn Configuration
- * ================================================================
- *
- * Search queries per genre — edit these to change what songs appear.
- * The player searches JioSaavn for each query and plays matching songs.
- *
- * Media URL decryption key (well-known, required for JioSaavn CDN):
- */
-#define JIOSAAVN_DES_KEY    "38346591"
-#define JIOSAAVN_API_BASE   "https://www.jiosaavn.com/api.php"
-#define JIOSAAVN_QUALITY    "160"   /* 96=low  160=medium(MP3)  320=high(AAC) */
-
+ *  Song / genre definitions (JioSaavn)
+ * ================================================================ */
 #define MAX_STATIONS    10
-#define NAME_LEN        96
-#define URL_LEN         384
+#define NAME_LEN        128
+#define URL_LEN         300
 
 typedef struct {
     char name[NAME_LEN];
@@ -66,25 +50,20 @@ typedef struct {
 } station_t;
 
 typedef struct {
-    const char *label;          /* display name  */
-    const char *query;          /* JioSaavn search query (URL-encoded) */
+    const char *label;   /* display name */
+    const char *query;   /* JioSaavn search query */
 } genre_t;
 
-/*
- * ── Curated JioSaavn search queries ──────────────────────────
- * Spaces must be '+' (URL query encoding).
- * Tweak these strings to refine the song selection.
- */
 static const genre_t genres[] = {
-    { "BW Latest",  "new+hindi+songs"            },
-    { "BW 90s",     "90s+bollywood+hits"          },
-    { "Bhajans",    "bhajans+devotional"          },
-    { "Dance Mix",  "bollywood+dance+party+hits"  },
-    { "Lofi",       "hindi+lofi+chill"            },
+    { "BW Latest",  "new bollywood songs 2024" },
+    { "BW 90s",     "90s bollywood hits" },
+    { "Bhajans",    "popular bhajans" },
+    { "Dance Mix",  "bollywood dance party" },
+    { "Lofi",       "lofi chill hindi" },
 };
 #define GENRE_COUNT (sizeof(genres)/sizeof(genres[0]))
 
-/* ── Dynamic station list (fetched from API or loaded from fallbacks) ── */
+/* ── Dynamic song list (fetched from JioSaavn) ── */
 static station_t s_stations[MAX_STATIONS];
 static int       s_station_count    = 0;
 static int       s_current_station  = 0;
@@ -113,27 +92,22 @@ static volatile bool s_pause_toggle      = false;
 static volatile bool s_skip_next         = false;
 static volatile bool s_skip_prev         = false;
 static volatile int  s_genre_switch      = -1;
-static volatile bool s_new_song          = false;
 
 /* ================================================================
  *  Audio pipeline handles
  * ================================================================ */
-#define STREAM_BUF_SIZE     (64 * 1024)
-#define DEC_INPUT_BUF_SIZE  (8 * 1024)
-#define PREBUFFER_BYTES     (16 * 1024)
-#define PCM_OUT_BUF_SIZE    (8 * 1024)
-
-/* Backward compat — stream buffer still called s_mp3_buf internally */
-#define MP3_BUF_SIZE  STREAM_BUF_SIZE
+#define MP3_BUF_SIZE        (64 * 1024)
+#define MP3_INPUT_BUF_SIZE  (8 * 1024)
+#define PRE_BUFFER_BYTES    (16 * 1024)
+#define API_BUF_SIZE        (48 * 1024)
 
 static StreamBufferHandle_t s_mp3_buf    = NULL;
-static uint8_t             *s_mp3_buf_storage = NULL;   /* PSRAM backing */
-static StaticStreamBuffer_t s_mp3_buf_struct;
 static TaskHandle_t         s_stream_task = NULL;
 static TaskHandle_t         s_decode_task = NULL;
 static volatile bool        s_stop_requested = false;
 
 static i2s_chan_handle_t         s_i2s_tx = NULL;
+static mp3dec_t                  s_mp3dec;
 
 /* ================================================================
  *  LVGL objects
@@ -169,29 +143,6 @@ static void audio_init(int sample_rate)
         return;
     }
 
-    /* ── Explicitly reconfigure I2S TX channel to the target sample rate.
-     *    This guarantees correct clocks regardless of codec_dev
-     *    pairing/keeper state from mic or boot_sound. ── */
-    i2s_channel_disable(s_i2s_tx);
-
-    i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(sample_rate);
-    clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
-    esp_err_t rc = i2s_channel_reconfig_std_clock(s_i2s_tx, &clk_cfg);
-    if (rc != ESP_OK) {
-        ESP_LOGE(TAG, "I2S clock reconfig to %d Hz failed: %s",
-                 sample_rate, esp_err_to_name(rc));
-    }
-
-    i2s_std_slot_config_t slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(
-                        I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO);
-    rc = i2s_channel_reconfig_std_slot(s_i2s_tx, &slot_cfg);
-    if (rc != ESP_OK) {
-        ESP_LOGE(TAG, "I2S slot reconfig failed: %s", esp_err_to_name(rc));
-    }
-
-    i2s_channel_enable(s_i2s_tx);
-
-    /* ── ES8311 codec setup via esp_codec_dev ── */
     audio_codec_i2c_cfg_t i2c_cfg = {
         .addr       = ES8311_CODEC_DEFAULT_ADDR,
         .bus_handle = i2c_port0_bus_handle,
@@ -232,13 +183,10 @@ static void audio_init(int sample_rate)
         .sample_rate     = (uint32_t)sample_rate,
         .mclk_multiple   = 256,
     };
-    int ret = esp_codec_dev_open(s_codec_dev, &fs);
-    if (ret != 0) {
-        ESP_LOGE(TAG, "esp_codec_dev_open failed: %d (sr=%d)", ret, sample_rate);
-    }
-    esp_codec_dev_set_out_vol(s_codec_dev, g_volume * 100 / 255);
+    esp_codec_dev_open(s_codec_dev, &fs);
+    esp_codec_dev_write_reg(s_codec_dev, 0x32, g_volume);
 
-    ESP_LOGI(TAG, "Audio init: %d Hz mono (vol=%d)", sample_rate, g_volume);
+    ESP_LOGI(TAG, "Audio init: %d Hz mono", sample_rate);
 }
 
 static void audio_deinit(void)
@@ -248,11 +196,8 @@ static void audio_deinit(void)
         esp_codec_dev_delete(s_codec_dev);
         s_codec_dev = NULL;
     }
-    /* Disable TX but don't delete (shared channel) */
-    if (s_i2s_tx) {
-        i2s_channel_disable(s_i2s_tx);
-    }
-    s_i2s_tx   = NULL;
+    /* TX channel is shared — don't delete, just clear our pointer */
+    s_i2s_tx = NULL;
     s_codec_if = NULL;
     s_ctrl_if  = NULL;
     s_data_if  = NULL;
@@ -260,50 +205,84 @@ static void audio_deinit(void)
 }
 
 /* ================================================================
- *  JioSaavn URL decryption (DES-ECB + Base64)
+ *  JioSaavn DES-ECB URL decryption
+ *  Key: "38346591", Base64 decode → DES-ECB decrypt → PKCS#5 unpad
+ *  Then rewrite quality to _160.mp3 for minimp3 compatibility
  * ================================================================ */
-static int jiosaavn_decrypt_url(const char *encrypted, char *out, size_t out_size)
+static int jiosaavn_decrypt_url(const char *enc, char *out, int out_sz)
 {
-    size_t enc_len = strlen(encrypted);
-    if (enc_len == 0 || enc_len > 1024) return -1;
+    static const char des_key[8] = "38346591";
 
     /* Base64 decode */
-    size_t dec_len = 0;
-    unsigned char *decoded = heap_caps_malloc(enc_len, MALLOC_CAP_SPIRAM);
-    if (!decoded) return -1;
+    size_t b64_len = 0;
+    if (mbedtls_base64_decode(NULL, 0, &b64_len,
+                              (const unsigned char *)enc, strlen(enc)) !=
+            MBEDTLS_ERR_BASE64_BUFFER_TOO_SMALL || b64_len == 0)
+        return -1;
 
-    int ret = mbedtls_base64_decode(decoded, enc_len, &dec_len,
-                                    (const unsigned char *)encrypted, enc_len);
-    if (ret != 0 || dec_len == 0 || dec_len % 8 != 0) {
-        ESP_LOGW(TAG, "Base64 decode failed (ret=%d len=%d)", ret, (int)dec_len);
-        heap_caps_free(decoded);
+    uint8_t *cipher = heap_caps_malloc(b64_len + 16, MALLOC_CAP_SPIRAM);
+    if (!cipher) return -1;
+
+    size_t olen = 0;
+    if (mbedtls_base64_decode(cipher, b64_len + 16, &olen,
+                              (const unsigned char *)enc, strlen(enc)) != 0) {
+        heap_caps_free(cipher);
         return -1;
     }
 
-    if (dec_len + 1 > out_size) {
-        heap_caps_free(decoded);
-        return -1;
-    }
-
-    /* DES-ECB decrypt — 8 bytes at a time */
+    /* DES-ECB decrypt */
     mbedtls_des_context ctx;
     mbedtls_des_init(&ctx);
-    mbedtls_des_setkey_dec(&ctx, (const unsigned char *)JIOSAAVN_DES_KEY);
+    mbedtls_des_setkey_dec(&ctx, (const unsigned char *)des_key);
 
-    for (size_t i = 0; i + 8 <= dec_len; i += 8) {
-        mbedtls_des_crypt_ecb(&ctx, decoded + i, (unsigned char *)out + i);
+    uint8_t *plain = heap_caps_malloc(olen + 1, MALLOC_CAP_SPIRAM);
+    if (!plain) {
+        mbedtls_des_free(&ctx);
+        heap_caps_free(cipher);
+        return -1;
     }
+
+    for (size_t i = 0; i + 8 <= olen; i += 8)
+        mbedtls_des_crypt_ecb(&ctx, cipher + i, plain + i);
     mbedtls_des_free(&ctx);
-    heap_caps_free(decoded);
+    heap_caps_free(cipher);
 
-    /* Remove PKCS#5 padding */
-    int pad = (unsigned char)out[dec_len - 1];
-    if (pad >= 1 && pad <= 8) dec_len -= pad;
-    out[dec_len] = '\0';
+    /* PKCS#5 unpad */
+    if (olen == 0) { heap_caps_free(plain); return -1; }
+    uint8_t pad = plain[olen - 1];
+    if (pad > 0 && pad <= 8 && pad <= olen)
+        olen -= pad;
+    plain[olen] = '\0';
 
-    /* Keep .mp4 extension — CDN serves AAC in M4A container
-     * We'll use esp_audio_codec M4A simple decoder for playback */
+    /* Rewrite quality: replace _96.mp4 / _320.mp4 etc → _160.mp3
+     * This ensures we get MP3 format that minimp3 can decode */
+    char *url_str = (char *)plain;
 
+    /* Find the last underscore before .mp4 */
+    char *dot_mp4 = strstr(url_str, ".mp4");
+    if (dot_mp4) {
+        /* Walk backward to find the underscore before the bitrate */
+        char *us = dot_mp4 - 1;
+        while (us > url_str && *us != '_') us--;
+        if (*us == '_') {
+            /* Replace _XXX.mp4 with _160.mp3 */
+            int prefix_len = (int)(us - url_str);
+            if (prefix_len + 9 < out_sz) {   /* _160.mp3\0 = 9 */
+                memcpy(out, url_str, prefix_len);
+                memcpy(out + prefix_len, "_160.mp3", 8);
+                out[prefix_len + 8] = '\0';
+                heap_caps_free(plain);
+                return 0;
+            }
+        }
+    }
+
+    /* Fallback: just copy as-is */
+    int len = (int)olen;
+    if (len >= out_sz) len = out_sz - 1;
+    memcpy(out, plain, len);
+    out[len] = '\0';
+    heap_caps_free(plain);
     return 0;
 }
 
@@ -313,38 +292,35 @@ static int jiosaavn_decrypt_url(const char *encrypted, char *out, size_t out_siz
 static int fetch_jiosaavn_songs(int genre)
 {
     const genre_t *g = &genres[genre];
+    ESP_LOGI(TAG, "JioSaavn: searching '%s'", g->query);
 
-    char url[512];
-    snprintf(url, sizeof(url),
-             JIOSAAVN_API_BASE
-             "?__call=search.getResults&p=1&q=%s"
+    char api_url[400];
+    snprintf(api_url, sizeof(api_url),
+             "https://www.jiosaavn.com/api.php?"
+             "__call=search.getResults&p=1&q=%s"
              "&_format=json&_marker=0&n=%d",
              g->query, MAX_STATIONS);
+    /* URL-encode spaces → + */
+    for (char *p = api_url; *p; p++)
+        if (*p == ' ') *p = '+';
 
-    ESP_LOGI(TAG, "JioSaavn: searching '%s'", g->label);
-
-    #define API_BUF_SIZE  (48 * 1024)
     char *buf = heap_caps_malloc(API_BUF_SIZE, MALLOC_CAP_SPIRAM);
-    if (!buf) {
-        ESP_LOGE(TAG, "API buf alloc failed");
-        return -1;
-    }
+    if (!buf) { ESP_LOGE(TAG, "API buf alloc failed"); return -1; }
 
     esp_http_client_config_t cfg = {
-        .url               = url,
-        .timeout_ms        = 15000,
-        .buffer_size       = 4096,
-        .buffer_size_tx    = 2048,
+        .url              = api_url,
+        .timeout_ms       = 15000,
+        .buffer_size      = 4096,
+        .buffer_size_tx   = 2048,
         .crt_bundle_attach = esp_crt_bundle_attach,
     };
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
-    esp_http_client_set_header(client, "User-Agent",
-                               "Mozilla/5.0 (Linux; Android 14) ESPro/1.0");
+    esp_http_client_set_header(client, "User-Agent", "ESPro/1.0");
     esp_http_client_set_header(client, "Accept", "application/json");
 
     esp_err_t err = esp_http_client_open(client, 0);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "API connect failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "API open failed: %s", esp_err_to_name(err));
         esp_http_client_cleanup(client);
         heap_caps_free(buf);
         return -1;
@@ -362,26 +338,18 @@ static int fetch_jiosaavn_songs(int genre)
     esp_http_client_cleanup(client);
 
     ESP_LOGI(TAG, "API response: %d bytes (buf %d)", total, API_BUF_SIZE);
-    if (total <= 0) {
-        ESP_LOGW(TAG, "Empty API response");
-        heap_caps_free(buf);
-        return -1;
-    }
-    if (total >= API_BUF_SIZE - 2) {
-        ESP_LOGW(TAG, "API response truncated (%d >= %d)", total, API_BUF_SIZE);
-    }
 
+    /* Parse JSON — JioSaavn returns { "results": [ ... ] } */
     cJSON *root = cJSON_Parse(buf);
     heap_caps_free(buf);
     if (!root) {
-        ESP_LOGW(TAG, "JSON parse failed");
+        ESP_LOGE(TAG, "JSON parse failed");
         return -1;
     }
 
-    /* search.getResults returns { "results": [ ... ] } */
     cJSON *results = cJSON_GetObjectItem(root, "results");
     if (!results || !cJSON_IsArray(results)) {
-        ESP_LOGW(TAG, "No results array");
+        ESP_LOGE(TAG, "No 'results' array in response");
         cJSON_Delete(root);
         return -1;
     }
@@ -389,51 +357,35 @@ static int fetch_jiosaavn_songs(int genre)
     int count = cJSON_GetArraySize(results);
     if (count > MAX_STATIONS) count = MAX_STATIONS;
 
-    char dec_url[URL_LEN];
     int loaded = 0;
-
     for (int i = 0; i < count && loaded < MAX_STATIONS; i++) {
         cJSON *item = cJSON_GetArrayItem(results, i);
         if (!item) continue;
 
-        /* Song title — try "song" then "title" */
-        cJSON *j_title = cJSON_GetObjectItem(item, "song");
-        if (!j_title) j_title = cJSON_GetObjectItem(item, "title");
+        cJSON *j_song    = cJSON_GetObjectItem(item, "song");
+        cJSON *j_singers = cJSON_GetObjectItem(item, "singers");
+        cJSON *j_enc_url = cJSON_GetObjectItem(item, "encrypted_media_url");
 
-        /* Artist — try "singers" then "primary_artists" */
-        cJSON *j_artist = cJSON_GetObjectItem(item, "singers");
-        if (!j_artist) j_artist = cJSON_GetObjectItem(item, "primary_artists");
+        if (!j_enc_url || !j_enc_url->valuestring) continue;
 
-        /* Encrypted URL — top-level or inside more_info */
-        cJSON *j_enc = cJSON_GetObjectItem(item, "encrypted_media_url");
-        if (!j_enc || !j_enc->valuestring) {
-            cJSON *mi = cJSON_GetObjectItem(item, "more_info");
-            if (mi) j_enc = cJSON_GetObjectItem(mi, "encrypted_media_url");
-        }
+        /* Build display name: "Song - Artist" */
+        const char *song_name = (j_song && j_song->valuestring)
+                                    ? j_song->valuestring : "Unknown";
+        const char *singers   = (j_singers && j_singers->valuestring)
+                                    ? j_singers->valuestring : "";
+        snprintf(s_stations[loaded].name, NAME_LEN, "%s - %s",
+                 song_name, singers);
+        s_stations[loaded].name[NAME_LEN - 1] = '\0';
 
-        if (!j_title || !j_enc) continue;
-        if (!j_title->valuestring || !j_enc->valuestring) continue;
-        if (strlen(j_enc->valuestring) < 10) continue;
-
-        /* Decrypt media URL */
-        if (jiosaavn_decrypt_url(j_enc->valuestring, dec_url,
-                                 sizeof(dec_url)) != 0) {
+        /* Decrypt URL and rewrite to MP3 */
+        if (jiosaavn_decrypt_url(j_enc_url->valuestring,
+                                  s_stations[loaded].url, URL_LEN) != 0) {
             ESP_LOGW(TAG, "Decrypt failed for song %d", i);
             continue;
         }
 
-        /* Build display name: "Title - Artist" */
-        if (j_artist && j_artist->valuestring && strlen(j_artist->valuestring) > 0) {
-            snprintf(s_stations[loaded].name, NAME_LEN, "%s - %s",
-                     j_title->valuestring, j_artist->valuestring);
-        } else {
-            strncpy(s_stations[loaded].name, j_title->valuestring, NAME_LEN - 1);
-            s_stations[loaded].name[NAME_LEN - 1] = '\0';
-        }
-
-        strncpy(s_stations[loaded].url, dec_url, URL_LEN - 1);
-        s_stations[loaded].url[URL_LEN - 1] = '\0';
-
+        ESP_LOGI(TAG, "Song %d: %.60s → %.80s",
+                 loaded, s_stations[loaded].name, s_stations[loaded].url);
         loaded++;
     }
 
@@ -450,7 +402,7 @@ static void load_stations(int genre)
     int fetched = fetch_jiosaavn_songs(genre);
     if (fetched > 0) {
         s_station_count = fetched;
-        /* Shuffle for variety */
+        /* Fisher-Yates shuffle for variety */
         for (int i = s_station_count - 1; i > 0; i--) {
             int j = esp_random() % (i + 1);
             station_t tmp = s_stations[i];
@@ -461,8 +413,7 @@ static void load_stations(int genre)
 }
 
 /* ================================================================
- *  Stream internet radio (continuous HTTP MP3 stream)
- *  Handles redirects and ICY streams.
+ *  Stream a song (HTTP/HTTPS MP3 download → ring buffer)
  * ================================================================ */
 static void stream_radio(const char *url)
 {
@@ -472,13 +423,13 @@ static void stream_radio(const char *url)
         .url            = url,
         .timeout_ms     = 15000,
         .buffer_size    = 4096,
+        .buffer_size_tx = 2048,
         .crt_bundle_attach = esp_crt_bundle_attach,
         .max_redirection_count = 5,
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
-    esp_http_client_set_header(client, "User-Agent", "ESPro-Radio/1.0");
-    esp_http_client_set_header(client, "Icy-MetaData", "1");
+    esp_http_client_set_header(client, "User-Agent", "ESPro/1.0");
 
     esp_err_t err = esp_http_client_open(client, 0);
     if (err != ESP_OK) {
@@ -512,16 +463,14 @@ static void stream_radio(const char *url)
         return;
     }
 
-    /* Check for ICY metadata interval — not used for now,
-     * just consume the stream data directly */
+    ESP_LOGI(TAG, "Stream connected (HTTP %d), pumping data", status);
 
     s_state = PS_PLAYING;
     s_state_changed = true;
 
-    ESP_LOGI(TAG, "Stream connected (HTTP %d), pumping data", status);
-
     uint8_t buf[4096];
     int total_bytes = 0;
+    bool pre_buf_logged = false;
 
     while (!s_stop_requested) {
         if (s_state == PS_PAUSED) {
@@ -532,13 +481,17 @@ static void stream_radio(const char *url)
 
         int n = esp_http_client_read(client, (char *)buf, sizeof(buf));
         if (n <= 0) {
-            ESP_LOGW(TAG, "Radio stream ended/error (n=%d), total=%d bytes", n, total_bytes);
+            ESP_LOGI(TAG, "Song ended (n=%d, total=%d bytes)", n, total_bytes);
             break;
         }
         total_bytes += n;
-        if (total_bytes <= n)
+        if (total_bytes == n)
             ESP_LOGI(TAG, "First data chunk: %d bytes, header: %02X %02X %02X %02X",
                      n, buf[0], buf[1], buf[2], buf[3]);
+        if (!pre_buf_logged && total_bytes >= PRE_BUFFER_BYTES) {
+            ESP_LOGI(TAG, "Pre-buffer ready, starting decode");
+            pre_buf_logged = true;
+        }
         xStreamBufferSend(s_mp3_buf, buf, n, pdMS_TO_TICKS(500));
     }
 
@@ -547,35 +500,36 @@ static void stream_radio(const char *url)
 }
 
 /* ================================================================
- *  Streaming task — connects to current station and streams
+ *  Streaming task — loads songs, then streams them one by one
  * ================================================================ */
 static void stream_task(void *arg)
 {
-    /* Fetch songs here (not in AppMgr task) — HTTPS/TLS needs 10+KB stack */
+    /* Load stations here (not in do_start_playback) because
+     * JioSaavn API uses HTTPS/TLS which needs ~16KB stack */
     load_stations(s_genre_idx);
-
     if (s_station_count == 0) {
-        strncpy(s_song_title, "No songs found", sizeof(s_song_title) - 1);
+        snprintf(s_song_title, sizeof(s_song_title), "No songs found");
         s_meta_updated  = true;
         s_state         = PS_ERROR;
         s_state_changed = true;
-        ESP_LOGW(TAG, "No songs fetched");
+        ESP_LOGW(TAG, "No songs fetched, stream task exit");
         s_stream_task = NULL;
         vTaskDelete(NULL);
-        return;  /* unreachable, but clear intent */
+        return;
     }
 
     while (!s_stop_requested) {
         if (s_current_station >= s_station_count) {
-            ESP_LOGI(TAG, "Playlist ended, looping");
+            /* Wrap around to loop the playlist */
             s_current_station = 0;
         }
 
         station_t *st = &s_stations[s_current_station];
         snprintf(s_station_name, sizeof(s_station_name), "%s",
                  genres[s_genre_idx].label);
-        snprintf(s_song_title, sizeof(s_song_title), LV_SYMBOL_AUDIO " %s",
-                 st->name);
+        snprintf(s_song_title, sizeof(s_song_title),
+                 "Song %d/%d\n%s",
+                 s_current_station + 1, s_station_count, st->name);
         s_meta_updated  = true;
         s_state         = PS_CONNECTING;
         s_state_changed = true;
@@ -589,30 +543,20 @@ static void stream_task(void *arg)
             s_skip_next = false;
             s_current_station = (s_current_station + 1) % s_station_count;
             xStreamBufferReset(s_mp3_buf);
-            s_new_song = true;
             continue;
         }
         if (s_skip_prev) {
             s_skip_prev = false;
             s_current_station = (s_current_station + s_station_count - 1) % s_station_count;
             xStreamBufferReset(s_mp3_buf);
-            s_new_song = true;
             continue;
         }
 
-        /* Song ended — advance to next */
-        ESP_LOGI(TAG, "Song ended, playing next");
+        /* Song ended normally — auto-advance to next */
+        ESP_LOGI(TAG, "Song ended, advancing to next");
         s_current_station = (s_current_station + 1) % s_station_count;
         xStreamBufferReset(s_mp3_buf);
-        s_new_song = true;
-        vTaskDelay(pdMS_TO_TICKS(300));
-    }
-
-    if (!s_stop_requested) {
-        strncpy(s_song_title, "No songs available", sizeof(s_song_title) - 1);
-        s_meta_updated  = true;
-        s_state         = PS_ERROR;
-        s_state_changed = true;
+        vTaskDelay(pdMS_TO_TICKS(500));
     }
 
     ESP_LOGI(TAG, "Stream task exit");
@@ -621,7 +565,7 @@ static void stream_task(void *arg)
 }
 
 /* ================================================================
- *  M4A/AAC decode + I2S output task (using esp_audio_codec)
+ *  MP3 decode + I2S output task
  * ================================================================ */
 static void decode_task(void *arg)
 {
@@ -629,55 +573,33 @@ static void decode_task(void *arg)
              uxTaskGetStackHighWaterMark(NULL));
 
     bool hw_ok = false;
-    uint8_t *in_buf  = NULL;
-    uint8_t *pcm_buf = NULL;
-    int16_t *mono    = NULL;
-    esp_audio_simple_dec_handle_t dec = NULL;
+    int fill   = 0;
+    uint8_t *mp3_in = NULL;
+    int16_t *pcm    = NULL;
+    int16_t *mono   = NULL;
 
     if (!s_mp3_buf) {
         ESP_LOGE(TAG, "Decode: stream buffer is NULL!");
         goto done;
     }
 
-    in_buf  = heap_caps_malloc(DEC_INPUT_BUF_SIZE, MALLOC_CAP_SPIRAM);
-    pcm_buf = heap_caps_malloc(PCM_OUT_BUF_SIZE,   MALLOC_CAP_SPIRAM);
-    mono    = heap_caps_malloc(PCM_OUT_BUF_SIZE,    MALLOC_CAP_SPIRAM);
-    if (!in_buf || !pcm_buf || !mono) {
+    mp3dec_init(&s_mp3dec);
+
+    mp3_in = heap_caps_malloc(MP3_INPUT_BUF_SIZE, MALLOC_CAP_SPIRAM);
+    pcm    = heap_caps_malloc(MINIMP3_MAX_SAMPLES_PER_FRAME *
+                                       sizeof(int16_t), MALLOC_CAP_SPIRAM);
+    mono   = heap_caps_malloc(MINIMP3_MAX_SAMPLES_PER_FRAME *
+                                       sizeof(int16_t), MALLOC_CAP_SPIRAM);
+    if (!mp3_in || !pcm || !mono) {
         ESP_LOGE(TAG, "Decode buf alloc failed");
         goto done;
     }
+    mp3dec_frame_info_t info;
 
-    /* Register M4A/AAC decoders (one-time) */
-    static bool s_dec_registered = false;
-    if (!s_dec_registered) {
-        esp_audio_dec_register_default();
-        esp_audio_simple_dec_register_default();
-        s_dec_registered = true;
-    }
+    ESP_LOGI(TAG, "Decode task started");
 
-    /* Open M4A simple decoder — handles MP4 container + AAC decoding */
-    esp_audio_simple_dec_cfg_t cfg = {
-        .dec_type = ESP_AUDIO_SIMPLE_DEC_TYPE_M4A,
-    };
-    esp_audio_err_t ret = esp_audio_simple_dec_open(&cfg, &dec);
-    if (ret != ESP_AUDIO_ERR_OK || !dec) {
-        ESP_LOGE(TAG, "M4A decoder open failed: %d", ret);
-        goto done;
-    }
-
-    ESP_LOGI(TAG, "Decode task started (M4A/AAC)");
-
-    /* Pre-buffer: wait until stream buffer has enough data */
-    ESP_LOGI(TAG, "Waiting for pre-buffer (%d KB)...", PREBUFFER_BYTES / 1024);
-    while (!s_stop_requested) {
-        size_t avail = xStreamBufferBytesAvailable(s_mp3_buf);
-        if (avail >= PREBUFFER_BYTES) break;
-        vTaskDelay(pdMS_TO_TICKS(50));
-    }
-    if (s_stop_requested) goto done;
-    ESP_LOGI(TAG, "Pre-buffer ready, starting decode");
-
-    int fill = 0;
+    int total_decoded = 0;
+    int skip_count    = 0;
 
     while (!s_stop_requested) {
         if (s_state == PS_PAUSED) {
@@ -685,109 +607,71 @@ static void decode_task(void *arg)
             continue;
         }
 
-        /* Reset decoder between songs (new M4A container) */
-        if (s_new_song) {
-            s_new_song = false;
-
-            /* Silence output immediately — stop I2S so stale PCM isn't heard */
-            if (hw_ok && s_i2s_tx) {
-                i2s_channel_disable(s_i2s_tx);
-            }
-
-            esp_audio_simple_dec_reset(dec);
-            fill = 0;
-            ESP_LOGI(TAG, "Decoder reset for new song — I2S silenced");
-
-            /* Wait for new song data to arrive before decoding */
-            while (!s_stop_requested && !s_new_song) {
-                size_t avail = xStreamBufferBytesAvailable(s_mp3_buf);
-                if (avail >= PREBUFFER_BYTES) break;
-                vTaskDelay(pdMS_TO_TICKS(50));
-            }
-
-            /* Re-enable I2S once data is ready */
-            if (hw_ok && s_i2s_tx) {
-                i2s_channel_enable(s_i2s_tx);
-            }
-            if (s_stop_requested) goto done;
-            continue;   /* re-check flags at top of loop */
-        }
-
-        /* Fill input buffer from stream */
-        int space = DEC_INPUT_BUF_SIZE - fill;
+        int space = MP3_INPUT_BUF_SIZE - fill;
         if (space > 0) {
             size_t got = xStreamBufferReceive(s_mp3_buf,
-                            in_buf + fill, space, pdMS_TO_TICKS(100));
+                            mp3_in + fill, space, pdMS_TO_TICKS(100));
             fill += (int)got;
         }
-        if (fill == 0) {
+        if (fill < 512) {
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
 
-        /* Feed data to M4A simple decoder */
-        esp_audio_simple_dec_raw_t raw = {
-            .buffer   = in_buf,
-            .len      = (uint32_t)fill,
-            .eos      = false,
-            .consumed = 0,
-        };
-        esp_audio_simple_dec_out_t frame = {
-            .buffer = pcm_buf,
-            .len    = PCM_OUT_BUF_SIZE,
-        };
+        int samples = mp3dec_decode_frame(&s_mp3dec, mp3_in, fill,
+                                          pcm, &info);
 
-        ret = esp_audio_simple_dec_process(dec, &raw, &frame);
-
-        /* Remove consumed data */
-        if (raw.consumed > 0) {
-            fill -= (int)raw.consumed;
+        if (info.frame_bytes > 0) {
+            fill -= info.frame_bytes;
             if (fill > 0)
-                memmove(in_buf, in_buf + raw.consumed, fill);
+                memmove(mp3_in, mp3_in + info.frame_bytes, fill);
         }
 
-        if (ret == ESP_AUDIO_ERR_OK && frame.decoded_size > 0) {
+        if (samples > 0) {
             if (!hw_ok) {
-                esp_audio_simple_dec_info_t info = {0};
-                esp_audio_simple_dec_get_info(dec, &info);
-                int sr = info.sample_rate > 0 ? (int)info.sample_rate : 44100;
-                ESP_LOGI(TAG, "First AAC frame: %dHz %dch %dbps",
-                         sr, info.channel, info.bits_per_sample);
-                audio_init(sr);
+                ESP_LOGI(TAG, "First MP3 frame: %dHz %dch, calling audio_init",
+                         info.hz, info.channels);
+                audio_init(info.hz > 0 ? info.hz : 44100);
                 hw_ok = true;
+                ESP_LOGI(TAG, "Audio: %dHz %dch", info.hz, info.channels);
             }
+            total_decoded++;
 
-            /* Downmix stereo to mono for single-speaker output */
-            esp_audio_simple_dec_info_t info = {0};
-            esp_audio_simple_dec_get_info(dec, &info);
-            int16_t *out = (int16_t *)pcm_buf;
-            int out_bytes = (int)frame.decoded_size;
-
-            if (info.channel == 2) {
-                int samples = out_bytes / (2 * sizeof(int16_t));
-                int16_t *src = (int16_t *)pcm_buf;
+            int16_t *out = pcm;
+            int out_samples = samples;
+            if (info.channels == 2) {
                 for (int i = 0; i < samples; i++)
-                    mono[i] = (int16_t)(((int32_t)src[2*i] + src[2*i+1]) / 2);
+                    mono[i] = (int16_t)(((int32_t)pcm[2*i] + pcm[2*i+1]) / 2);
                 out = mono;
-                out_bytes = samples * sizeof(int16_t);
             }
 
             size_t written;
-            i2s_channel_write(s_i2s_tx, out, out_bytes,
+            i2s_channel_write(s_i2s_tx, out,
+                              out_samples * sizeof(int16_t),
                               &written, pdMS_TO_TICKS(500));
-        } else if (ret != ESP_AUDIO_ERR_OK && raw.consumed == 0 && fill > 0) {
-            /* Decoder can't make progress — skip a byte to recover */
-            fill--;
-            if (fill > 0) memmove(in_buf, in_buf + 1, fill);
+        } else if (info.frame_bytes == 0 && fill > 0) {
+            skip_count++;
+            if (skip_count <= 5 || (skip_count % 100) == 0)
+                ESP_LOGW(TAG, "No sync, skipping byte (skip=%d, fill=%d)",
+                         skip_count, fill);
+            int skip = 1;
+            for (int i = 1; i < fill - 1; i++) {
+                if (mp3_in[i] == 0xFF && (mp3_in[i+1] & 0xE0) == 0xE0) {
+                    skip = i;
+                    break;
+                }
+            }
+            fill -= skip;
+            if (fill > 0)
+                memmove(mp3_in, mp3_in + skip, fill);
             vTaskDelay(pdMS_TO_TICKS(5));
         }
     }
 
 done:
     if (hw_ok) audio_deinit();
-    if (dec) esp_audio_simple_dec_close(dec);
-    heap_caps_free(in_buf);
-    heap_caps_free(pcm_buf);
+    heap_caps_free(mp3_in);
+    heap_caps_free(pcm);
     heap_caps_free(mono);
 
     ESP_LOGI(TAG, "Decode task exit");
@@ -804,33 +688,15 @@ static void do_start_playback(void)
     s_skip_next      = false;
     s_skip_prev      = false;
 
-    /* Stop mic if active — avoids I2S full-duplex clock conflict */
-    if (mic_is_active()) {
-        ESP_LOGI(TAG, "Stopping mic before playback");
-        mic_stop();
-    }
-
-    /* Show loading message — actual fetch happens in stream_task (needs TLS stack) */
+    /* Show loading message — load_stations() runs in stream_task */
     snprintf(s_song_title, sizeof(s_song_title), "Loading %s...",
              genres[s_genre_idx].label);
     s_meta_updated = true;
-    s_state        = PS_CONNECTING;
-    s_state_changed = true;
 
     if (!s_mp3_buf) {
-        s_mp3_buf_storage = heap_caps_malloc(MP3_BUF_SIZE + 1, MALLOC_CAP_SPIRAM);
-        if (!s_mp3_buf_storage) {
-            ESP_LOGE(TAG, "Stream buffer storage alloc failed (%d bytes)!", MP3_BUF_SIZE);
-            s_state = PS_ERROR;
-            s_state_changed = true;
-            return;
-        }
-        s_mp3_buf = xStreamBufferCreateStatic(MP3_BUF_SIZE, 1,
-                        s_mp3_buf_storage, &s_mp3_buf_struct);
+        s_mp3_buf = xStreamBufferCreate(MP3_BUF_SIZE, 1);
         if (!s_mp3_buf) {
-            ESP_LOGE(TAG, "Stream buffer create failed!");
-            heap_caps_free(s_mp3_buf_storage);
-            s_mp3_buf_storage = NULL;
+            ESP_LOGE(TAG, "Stream buffer alloc failed (%d bytes)!", MP3_BUF_SIZE);
             s_state = PS_ERROR;
             s_state_changed = true;
             return;
@@ -839,6 +705,7 @@ static void do_start_playback(void)
         xStreamBufferReset(s_mp3_buf);
     }
 
+    /* stream_task needs 24KB for HTTPS/TLS (JioSaavn API + CDN) */
     BaseType_t r1 = xTaskCreatePinnedToCoreWithCaps(stream_task, "radio_rx", 24576,
                             NULL, 3, &s_stream_task, 1, MALLOC_CAP_SPIRAM);
     BaseType_t r2 = xTaskCreatePinnedToCoreWithCaps(decode_task, "mp3_dec",  32768,
@@ -887,42 +754,6 @@ static void genre_prev_cb(lv_event_t *e)
 {
     (void)e;
     s_genre_switch = (s_genre_idx + GENRE_COUNT - 1) % GENRE_COUNT;
-}
-
-static lv_obj_t *s_vol_lbl = NULL;
-
-static void vol_slider_cb(lv_event_t *e)
-{
-    lv_obj_t *slider = lv_event_get_target(e);
-    g_volume = (uint8_t)lv_slider_get_value(slider);
-    music_player_set_volume(g_volume);
-    if (s_vol_lbl)
-        lv_label_set_text_fmt(s_vol_lbl, LV_SYMBOL_VOLUME_MAX " %d%%",
-                              g_volume * 100 / 255);
-}
-
-static void vol_down_cb(lv_event_t *e)
-{
-    (void)e;
-    int v = (int)g_volume - 25;
-    if (v < 0) v = 0;
-    g_volume = (uint8_t)v;
-    music_player_set_volume(g_volume);
-    if (s_vol_lbl)
-        lv_label_set_text_fmt(s_vol_lbl, LV_SYMBOL_VOLUME_MAX " %d%%",
-                              g_volume * 100 / 255);
-}
-
-static void vol_up_cb(lv_event_t *e)
-{
-    (void)e;
-    int v = (int)g_volume + 25;
-    if (v > 255) v = 255;
-    g_volume = (uint8_t)v;
-    music_player_set_volume(g_volume);
-    if (s_vol_lbl)
-        lv_label_set_text_fmt(s_vol_lbl, LV_SYMBOL_VOLUME_MAX " %d%%",
-                              g_volume * 100 / 255);
 }
 
 /* ================================================================
@@ -1054,68 +885,14 @@ static void build_ui(void)
     lv_obj_set_style_text_color(nl, lv_color_hex(th_text), 0);
     lv_obj_center(nl);
 
-    /* ── Vertical volume control (right edge) ──── */
-    lv_obj_t *vol_col = lv_obj_create(s_overlay);
-    lv_obj_remove_style_all(vol_col);
-    lv_obj_set_size(vol_col, 36, 152);
-    lv_obj_align(vol_col, LV_ALIGN_RIGHT_MID, -6, 0);
-    lv_obj_set_flex_flow(vol_col, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(vol_col, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(vol_col, 4, 0);
-    lv_obj_clear_flag(vol_col, LV_OBJ_FLAG_SCROLLABLE);
-
-    /* Vol + button (top) */
-    lv_obj_t *vup = lv_btn_create(vol_col);
-    lv_obj_set_size(vup, 30, 26);
-    lv_obj_set_style_bg_color(vup, lv_color_hex(th_btn), 0);
-    lv_obj_set_style_radius(vup, 6, 0);
-    lv_obj_add_event_cb(vup, vol_up_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *vul = lv_label_create(vup);
-    lv_label_set_text(vul, LV_SYMBOL_PLUS);
-    lv_obj_set_style_text_color(vul, lv_color_hex(th_text), 0);
-    lv_obj_set_style_text_font(vul, &lv_font_montserrat_14, 0);
-    lv_obj_center(vul);
-
-    /* Vertical volume slider */
-    lv_obj_t *vol_slider = lv_slider_create(vol_col);
-    lv_obj_set_size(vol_slider, 10, 80);
-    lv_slider_set_range(vol_slider, 0, 255);
-    lv_slider_set_value(vol_slider, g_volume, LV_ANIM_OFF);
-    lv_obj_set_style_bg_color(vol_slider, lv_color_hex(th_btn), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(vol_slider, lv_color_hex(0x2ECC71), LV_PART_INDICATOR);
-    lv_obj_set_style_bg_color(vol_slider, lv_color_hex(0x2ECC71), LV_PART_KNOB);
-    lv_obj_set_style_pad_all(vol_slider, 4, LV_PART_KNOB);
-    lv_obj_add_event_cb(vol_slider, vol_slider_cb, LV_EVENT_VALUE_CHANGED, NULL);
-
-    /* Vol – button (bottom) */
-    lv_obj_t *vdn = lv_btn_create(vol_col);
-    lv_obj_set_size(vdn, 30, 26);
-    lv_obj_set_style_bg_color(vdn, lv_color_hex(th_btn), 0);
-    lv_obj_set_style_radius(vdn, 6, 0);
-    lv_obj_add_event_cb(vdn, vol_down_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *vdl = lv_label_create(vdn);
-    lv_label_set_text(vdl, LV_SYMBOL_MINUS);
-    lv_obj_set_style_text_color(vdl, lv_color_hex(th_text), 0);
-    lv_obj_set_style_text_font(vdl, &lv_font_montserrat_14, 0);
-    lv_obj_center(vdl);
-
-    /* Volume percentage label */
-    s_vol_lbl = lv_label_create(s_overlay);
-    lv_label_set_text_fmt(s_vol_lbl, LV_SYMBOL_VOLUME_MAX " %d%%",
-                          g_volume * 100 / 255);
-    lv_obj_set_style_text_font(s_vol_lbl, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(s_vol_lbl, lv_color_hex(th_label), 0);
-    lv_obj_align(s_vol_lbl, LV_ALIGN_BOTTOM_MID, 0, -4);
-
-    /* ── Station index indicator (bottom-left) ──── */
+    /* ── Station index indicator (bottom) ──── */
     s_idx_lbl = lv_label_create(s_overlay);
-    lv_label_set_text_fmt(s_idx_lbl, "%s  %d/%d",
+    lv_label_set_text_fmt(s_idx_lbl, "%s  (%d/%d)",
                           genres[s_genre_idx].label,
                           s_genre_idx + 1, (int)GENRE_COUNT);
     lv_obj_set_style_text_font(s_idx_lbl, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(s_idx_lbl, lv_color_hex(th_label), 0);
-    lv_obj_align(s_idx_lbl, LV_ALIGN_BOTTOM_LEFT, 10, -4);
+    lv_obj_align(s_idx_lbl, LV_ALIGN_BOTTOM_MID, 0, -4);
 }
 
 /* ================================================================
@@ -1141,7 +918,7 @@ void music_player_open(lv_obj_t *parent)
     s_state           = PS_IDLE;
 
     build_ui();
-    ESP_LOGI(TAG, "Radio player opened");
+    ESP_LOGI(TAG, "Music player opened");
 }
 
 void music_player_close(void)
@@ -1160,17 +937,12 @@ void music_player_close(void)
         vStreamBufferDelete(s_mp3_buf);
         s_mp3_buf = NULL;
     }
-    if (s_mp3_buf_storage) {
-        heap_caps_free(s_mp3_buf_storage);
-        s_mp3_buf_storage = NULL;
-    }
 
     s_song_lbl     = NULL;
     s_status_lbl   = NULL;
     s_play_btn_lbl = NULL;
     s_idx_lbl      = NULL;
     s_genre_lbl    = NULL;
-    s_vol_lbl      = NULL;
 
     if (s_overlay) { lv_obj_del(s_overlay); s_overlay = NULL; }
     s_active = false;
@@ -1186,7 +958,7 @@ bool music_player_is_active(void)
 void music_player_set_volume(uint8_t vol)
 {
     if (s_codec_dev) {
-        esp_codec_dev_set_out_vol(s_codec_dev, vol * 100 / 255);
+        esp_codec_dev_write_reg(s_codec_dev, 0x32, vol);
     }
 }
 
@@ -1205,16 +977,11 @@ void music_player_update(void)
                 vStreamBufferDelete(s_mp3_buf);
                 s_mp3_buf = NULL;
             }
-            if (s_mp3_buf_storage) {
-                heap_caps_free(s_mp3_buf_storage);
-                s_mp3_buf_storage = NULL;
-            }
             s_song_lbl     = NULL;
             s_status_lbl   = NULL;
             s_play_btn_lbl = NULL;
             s_idx_lbl      = NULL;
             s_genre_lbl    = NULL;
-            s_vol_lbl      = NULL;
             if (s_overlay) { lv_obj_del(s_overlay); s_overlay = NULL; }
             s_active          = false;
             s_close_requested = false;
@@ -1286,7 +1053,7 @@ void music_player_update(void)
         s_meta_updated = false;
         lv_label_set_text(s_song_lbl, s_song_title);
         if (s_idx_lbl && s_station_count > 0)
-            lv_label_set_text_fmt(s_idx_lbl, "Song %d/%d  |  %s",
+            lv_label_set_text_fmt(s_idx_lbl, "Station %d/%d  |  %s",
                                   s_current_station + 1, s_station_count,
                                   genres[s_genre_idx].label);
     }
@@ -1297,7 +1064,7 @@ void music_player_update(void)
         uint32_t   col  = 0x888888;
         switch (s_state) {
             case PS_CONNECTING: txt = "Connecting..."; col = 0xFFCC00; break;
-            case PS_PLAYING:    txt = LV_SYMBOL_AUDIO " Playing"; col = 0x00FF88; break;
+            case PS_PLAYING:    txt = LV_SYMBOL_AUDIO " Live";  col = 0x00FF88; break;
             case PS_PAUSED:     txt = "Paused";        col = 0xFFCC00; break;
             case PS_ERROR:      txt = "Error";         col = 0xFF4444; break;
             default: break;

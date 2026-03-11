@@ -9,6 +9,26 @@ dependencies:
       registry_url: https://components.espressif.com
       type: service
     version: 0.5.3
+  espressif/esp_audio_codec:
+    component_hash: af4663830bc73eca58febcc34a976d003465e78ed57458aa00a14b231e392ca1
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.4'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 2.4.1
+  espressif/esp_codec_dev:
+    component_hash: 0d9e9bc288156eb55f79338d312e1ebf8c9dfbd5e7d13ef0f20ccb031b4e15cf
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.5.4
   espressif/esp_io_expander:
     component_hash: 034903704f65e3994d7cce9d080b19d89525cf6d416574b932826adf680f3942
     dependencies:
@@ -73,10 +93,12 @@ dependencies:
       type: service
     version: 8.4.0
 direct_dependencies:
+- espressif/esp_audio_codec
+- espressif/esp_codec_dev
 - espressif/esp_io_expander_tca9554
 - espressif/esp_lcd_axs15231b
 - idf
 - lvgl/lvgl
-manifest_hash: 3ec8c5f89d1667079e63a1c4ae9e09d0cfad538242011b76d2671fb3ac040d60
+manifest_hash: 8143390ee5c4e9004f3f3dc731f9e69410e50021ba835e7df383e26c2a88c53e
 target: esp32s3
 version: 2.0.0

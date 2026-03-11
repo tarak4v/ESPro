@@ -18,4 +18,4 @@ idf_component_register(
          "services/macropad.c"
     INCLUDE_DIRS "." "core" "audio" "screens" "services"
     REQUIRES bt
-    PRIV_REQUIRES i2c_bsp lcd_bl_pwm_bsp nvs_flash esp_http_client esp_http_server esp_wifi esp_netif esp_event esp_timer driver esp_driver_i2s json spiffs mbedtls minimp3 esp_hid espressif__esp_codec_dev)
+    PRIV_REQUIRES i2c_bsp lcd_bl_pwm_bsp nvs_flash esp_http_client esp_http_server esp_wifi esp_netif esp_event esp_timer driver esp_driver_i2s json spiffs mbedtls minimp3 esp_hid espressif__esp_codec_dev espressif__esp_audio_codec)

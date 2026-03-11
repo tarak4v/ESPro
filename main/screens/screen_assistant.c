@@ -731,6 +731,18 @@ static void http_task(void *arg)
 
                 i2s_chan_handle_t tx = mic_get_shared_i2s_tx();
                 if (tx) {
+                    /* Explicitly reconfigure I2S TX for TTS sample rate */
+                    i2s_channel_disable(tx);
+                    i2s_std_clk_config_t clk_cfg =
+                        I2S_STD_CLK_DEFAULT_CONFIG(wav_sr);
+                    clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
+                    i2s_channel_reconfig_std_clock(tx, &clk_cfg);
+                    i2s_std_slot_config_t slot_cfg =
+                        I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(
+                            I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO);
+                    i2s_channel_reconfig_std_slot(tx, &slot_cfg);
+                    i2s_channel_enable(tx);
+
                     /* Set up ES8311 codec for TTS sample rate */
                     audio_codec_i2c_cfg_t i2c_cfg = {
                         .addr       = ES8311_CODEC_DEFAULT_ADDR,
@@ -771,7 +783,7 @@ static void http_task(void *arg)
                             .mclk_multiple   = 256,
                         };
                         esp_codec_dev_open(dev, &fs);
-                        esp_codec_dev_write_reg(dev, 0x32, g_volume);
+                        esp_codec_dev_set_out_vol(dev, g_volume * 100 / 255);
 
                         /* Stereo → mono downmix in-place if needed */
                         uint8_t *pcm = audio_buf + data_off;
@@ -806,6 +818,8 @@ static void http_task(void *arg)
                         esp_codec_dev_close(dev);
                         esp_codec_dev_delete(dev);
                     }
+                    /* Disable TX after TTS playback */
+                    i2s_channel_disable(tx);
                 }
             }
         }

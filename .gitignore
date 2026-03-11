@@ -16,3 +16,7 @@ Thumbs.db
 
 # Backup files
 *.bak
+
+# Secrets (API keys, credentials)
+main/secrets.h
+tools/.env
