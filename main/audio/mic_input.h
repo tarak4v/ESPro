@@ -41,6 +41,20 @@ bool mic_is_active(void);
  */
 uint8_t mic_get_level(void);
 
+/**
+ * Set a PSRAM buffer for concurrent recording.
+ * While set, the mic task copies raw PCM into this buffer.
+ * @param buf      Pointer to int16_t buffer (PSRAM recommended).
+ * @param max_bytes  Maximum buffer size in bytes.
+ */
+void mic_set_record_buffer(int16_t *buf, size_t max_bytes);
+
+/** Return number of bytes written to the recording buffer so far. */
+size_t mic_get_recorded_bytes(void);
+
+/** Clear the recording buffer pointer (stop recording). */
+void mic_clear_record_buffer(void);
+
 #ifdef __cplusplus
 }
 #endif

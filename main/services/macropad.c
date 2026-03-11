@@ -264,10 +264,10 @@ static esp_err_t start_ble_adv(void)
     struct ble_gap_adv_params params = {0};
     params.conn_mode = BLE_GAP_CONN_MODE_UND;
     params.disc_mode = BLE_GAP_DISC_MODE_GEN;
-    params.itvl_min  = BLE_GAP_ADV_ITVL_MS(30);
-    params.itvl_max  = BLE_GAP_ADV_ITVL_MS(50);
+    params.itvl_min  = BLE_GAP_ADV_ITVL_MS(100);
+    params.itvl_max  = BLE_GAP_ADV_ITVL_MS(150);
 
-    rc = ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, 180000,
+    rc = ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER,
                            &params, gap_event_cb, NULL);
     if (rc == BLE_HS_EALREADY) {
         return ESP_OK;              /* already advertising */
@@ -297,12 +297,16 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_DISCONNECT:
         s_ble_conn = false;
         set_status(LV_SYMBOL_BLUETOOTH " Disconnected");
-        ESP_LOGI(TAG, "BLE disconnected, restarting adv");
+        ESP_LOGI(TAG, "BLE disconnected (reason=%d), restarting adv in 1s",
+                 event->disconnect.reason);
+        /* Delay before re-advertising to avoid rapid reconnect loops */
+        vTaskDelay(pdMS_TO_TICKS(1000));
         start_ble_adv();
         break;
 
     case BLE_GAP_EVENT_ADV_COMPLETE:
         if (!s_ble_conn) {
+            ESP_LOGI(TAG, "Adv complete, restarting");
             start_ble_adv();
         }
         break;
@@ -357,9 +361,8 @@ static void hidd_event_cb(void *handler_args, esp_event_base_t base,
         set_status(LV_SYMBOL_BLUETOOTH " Connected");
         break;
     case ESP_HIDD_DISCONNECT_EVENT:
+        /* GAP callback already handles re-advertising — just update state */
         s_ble_conn = false;
-        set_status(LV_SYMBOL_BLUETOOTH " Disconnected");
-        start_ble_adv();
         break;
     case ESP_HIDD_STOP_EVENT:
         set_status("BLE stopped");

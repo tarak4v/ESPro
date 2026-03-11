@@ -147,10 +147,13 @@ static volatile int  s_genre_switch      = -1;
 /* ================================================================
  *  Audio pipeline handles
  * ================================================================ */
-#define MP3_BUF_SIZE        (24 * 1024)
+#define MP3_BUF_SIZE        (64 * 1024)
 #define MP3_INPUT_BUF_SIZE  (8 * 1024)
+#define PREBUFFER_BYTES     (16 * 1024)
 
 static StreamBufferHandle_t s_mp3_buf    = NULL;
+static uint8_t             *s_mp3_buf_storage = NULL;   /* PSRAM backing */
+static StaticStreamBuffer_t s_mp3_buf_struct;
 static TaskHandle_t         s_stream_task = NULL;
 static TaskHandle_t         s_decode_task = NULL;
 static volatile bool        s_stop_requested = false;
@@ -437,7 +440,7 @@ static void stream_radio(const char *url)
 
     ESP_LOGI(TAG, "Stream connected (HTTP %d), pumping data", status);
 
-    uint8_t buf[2048];
+    uint8_t buf[4096];
     int total_bytes = 0;
 
     while (!s_stop_requested) {
@@ -554,6 +557,16 @@ static void decode_task(void *arg)
 
     ESP_LOGI(TAG, "Decode task started");
 
+    /* Pre-buffer: wait until stream buffer has enough data */
+    ESP_LOGI(TAG, "Waiting for pre-buffer (%d KB)...", PREBUFFER_BYTES / 1024);
+    while (!s_stop_requested) {
+        size_t avail = xStreamBufferBytesAvailable(s_mp3_buf);
+        if (avail >= PREBUFFER_BYTES) break;
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    if (s_stop_requested) goto done;
+    ESP_LOGI(TAG, "Pre-buffer ready, starting decode");
+
     int total_decoded = 0;
     int skip_count    = 0;
 
@@ -660,9 +673,19 @@ static void do_start_playback(void)
     }
 
     if (!s_mp3_buf) {
-        s_mp3_buf = xStreamBufferCreate(MP3_BUF_SIZE, 1);
+        s_mp3_buf_storage = heap_caps_malloc(MP3_BUF_SIZE + 1, MALLOC_CAP_SPIRAM);
+        if (!s_mp3_buf_storage) {
+            ESP_LOGE(TAG, "Stream buffer storage alloc failed (%d bytes)!", MP3_BUF_SIZE);
+            s_state = PS_ERROR;
+            s_state_changed = true;
+            return;
+        }
+        s_mp3_buf = xStreamBufferCreateStatic(MP3_BUF_SIZE, 1,
+                        s_mp3_buf_storage, &s_mp3_buf_struct);
         if (!s_mp3_buf) {
-            ESP_LOGE(TAG, "Stream buffer alloc failed (%d bytes)!", MP3_BUF_SIZE);
+            ESP_LOGE(TAG, "Stream buffer create failed!");
+            heap_caps_free(s_mp3_buf_storage);
+            s_mp3_buf_storage = NULL;
             s_state = PS_ERROR;
             s_state_changed = true;
             return;
@@ -671,7 +694,7 @@ static void do_start_playback(void)
         xStreamBufferReset(s_mp3_buf);
     }
 
-    BaseType_t r1 = xTaskCreatePinnedToCoreWithCaps(stream_task, "radio_rx", 12288,
+    BaseType_t r1 = xTaskCreatePinnedToCoreWithCaps(stream_task, "radio_rx", 16384,
                             NULL, 3, &s_stream_task, 1, MALLOC_CAP_SPIRAM);
     BaseType_t r2 = xTaskCreatePinnedToCoreWithCaps(decode_task, "mp3_dec",  32768,
                             NULL, 4, &s_decode_task, 1, MALLOC_CAP_SPIRAM);
@@ -902,6 +925,10 @@ void music_player_close(void)
         vStreamBufferDelete(s_mp3_buf);
         s_mp3_buf = NULL;
     }
+    if (s_mp3_buf_storage) {
+        heap_caps_free(s_mp3_buf_storage);
+        s_mp3_buf_storage = NULL;
+    }
 
     s_song_lbl     = NULL;
     s_status_lbl   = NULL;
@@ -941,6 +968,10 @@ void music_player_update(void)
             if (s_mp3_buf) {
                 vStreamBufferDelete(s_mp3_buf);
                 s_mp3_buf = NULL;
+            }
+            if (s_mp3_buf_storage) {
+                heap_caps_free(s_mp3_buf_storage);
+                s_mp3_buf_storage = NULL;
             }
             s_song_lbl     = NULL;
             s_status_lbl   = NULL;

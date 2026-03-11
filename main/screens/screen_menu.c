@@ -30,6 +30,7 @@
 #include "game_maze.h"
 #include "music_player.h"
 #include "macropad.h"
+#include "screen_assistant.h"
 
 static const char *TAG = "menu";
 
@@ -868,7 +869,7 @@ static void card_click_cb(lv_event_t *e)
     ESP_LOGI(TAG, "App tapped: %s (#%d)", apps[idx].name, (int)idx);
     switch (idx) {
         case 0: open_led_overlay();     break;
-        case 1: open_ai_overlay();      break;
+        case 1: screen_assistant_open(scr); break;
         case 2: game_maze_open(scr);    break;
         case 3: music_player_open(scr); break;
         case 4: app_manager_set_mode(MODE_TAMAFI); break;
@@ -962,15 +963,9 @@ void screen_menu_update(void)
 
     /* Macropad — nothing to tick, but close check */
 
-    /* AI response ready */
-    if (ai_response_ready && ai_response_lbl) {
-        ai_response_ready = false;
-        lv_label_set_text(ai_response_lbl, ai_response);
-        if (ai_status_lbl) {
-            lv_label_set_text(ai_status_lbl, "Done");
-            lv_obj_set_style_text_color(ai_status_lbl,
-                                        lv_color_hex(0x00FF88), 0);
-        }
+    /* AI voice assistant tick */
+    if (screen_assistant_is_active()) {
+        screen_assistant_update();
     }
 }
 

@@ -37,13 +37,18 @@ static TaskHandle_t           s_task     = NULL;
 static volatile bool          s_running  = false;
 static volatile uint8_t       s_level    = 0;
 
+/* ── Recording buffer (optional, set by screen_assistant) ── */
+static int16_t               *s_rec_buf  = NULL;
+static size_t                 s_rec_max  = 0;   /* max bytes */
+static volatile size_t        s_rec_pos  = 0;   /* bytes written */
+
 /* ── RMS → 0..100 mapping ──────────────────────────────── */
 static uint8_t rms_to_level(float rms)
 {
-    /* Typical quiet room ≈ 200, loud voice ≈ 8000+.
-       Map with log scale: level = 20 * log10(rms / 100), clamped 0..100 */
-    if (rms < 100.0f) return 0;
-    float db = 20.0f * log10f(rms / 100.0f);
+    /* ES7210 with 30 dB gain: quiet room ≈ 10–30, voice ≈ 100–2000+.
+       Map with log scale: level = 40 * log10(rms / 5), clamped 0..100 */
+    if (rms < 5.0f) return 0;
+    float db = 40.0f * log10f(rms / 5.0f);
     if (db < 0) return 0;
     if (db > 100) return 100;
     return (uint8_t)db;
@@ -62,12 +67,28 @@ static void mic_task(void *arg)
     }
 
     ESP_LOGI(TAG, "Mic reader task started");
+    int read_count = 0;
+    int err_count = 0;
 
     while (s_running) {
         size_t bytes_read = 0;
         esp_err_t err = i2s_channel_read(s_rx, buf, MIC_READ_BYTES,
                                           &bytes_read, pdMS_TO_TICKS(100));
-        if (err != ESP_OK || bytes_read == 0) continue;
+        if (err != ESP_OK || bytes_read == 0) {
+            err_count++;
+            if (err_count <= 5) {
+                ESP_LOGW(TAG, "i2s_channel_read err=%d bytes=%u", err, (unsigned)bytes_read);
+            }
+            continue;
+        }
+
+        read_count++;
+
+        /* Copy to recording buffer if active */
+        if (s_rec_buf && s_rec_pos + bytes_read <= s_rec_max) {
+            memcpy((uint8_t *)s_rec_buf + s_rec_pos, buf, bytes_read);
+            s_rec_pos += bytes_read;
+        }
 
         /* Compute RMS */
         int samples = bytes_read / 2;
@@ -78,6 +99,13 @@ static void mic_task(void *arg)
         }
         float rms = sqrtf((float)sum_sq / samples);
         s_level = rms_to_level(rms);
+
+        /* Log every ~1 second (16000 Hz / 512 samples = ~31 reads/sec) */
+        if (read_count % 31 == 1) {
+            ESP_LOGI(TAG, "mic: reads=%d rms=%.0f level=%u rec_pos=%u/%u",
+                     read_count, rms, s_level,
+                     (unsigned)s_rec_pos, (unsigned)s_rec_max);
+        }
     }
 
     free(buf);
@@ -213,7 +241,15 @@ void mic_start(void)
             .channel         = 1,
             .sample_rate     = MIC_SAMPLE_RATE,
         };
-        esp_codec_dev_open(s_mic_dev, &fs);
+        esp_err_t ret = esp_codec_dev_open(s_mic_dev, &fs);
+        ESP_LOGI(TAG, "esp_codec_dev_open => %s", esp_err_to_name(ret));
+        /* Set microphone input gain (30 dB) */
+        if (ret == ESP_OK) {
+            esp_codec_dev_set_in_gain(s_mic_dev, 30.0);
+            ESP_LOGI(TAG, "Mic input gain set to 30 dB");
+        }
+    } else {
+        ESP_LOGE(TAG, "s_mic_dev is NULL — ES7210 not initialised!");
     }
 
     s_running = true;
@@ -249,4 +285,23 @@ bool mic_is_active(void)
 uint8_t mic_get_level(void)
 {
     return s_level;
+}
+
+void mic_set_record_buffer(int16_t *buf, size_t max_bytes)
+{
+    s_rec_buf = buf;
+    s_rec_max = max_bytes;
+    s_rec_pos = 0;
+}
+
+size_t mic_get_recorded_bytes(void)
+{
+    return s_rec_pos;
+}
+
+void mic_clear_record_buffer(void)
+{
+    s_rec_buf = NULL;
+    s_rec_max = 0;
+    s_rec_pos = 0;
 }

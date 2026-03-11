@@ -224,10 +224,12 @@ static void qmi8658_init(void)
     i2c_writr_buff(imu_dev_handle, QMI8658_REG_CTRL1, &val, 1);
     val = 0x25;           /* Accel ODR 250Hz, ±8g */
     i2c_writr_buff(imu_dev_handle, QMI8658_REG_CTRL2, &val, 1);
-    val = 0x01;           /* Enable accel only (no gyro needed) */
+    val = 0x65;           /* Gyro ODR 250Hz, ±512 dps */
+    i2c_writr_buff(imu_dev_handle, QMI8658_REG_CTRL3, &val, 1);
+    val = 0x03;           /* Enable accel + gyro */
     i2c_writr_buff(imu_dev_handle, QMI8658_REG_CTRL7, &val, 1);
 
-    ESP_LOGI(TAG, "QMI8658 IMU initialised (accel for orientation)");
+    ESP_LOGI(TAG, "QMI8658 IMU initialised (accel + gyro)");
 }
 
 /* ── Orientation check (called from app_update_task) ────────── */

@@ -16,6 +16,7 @@
 #include "boot_sound.h"
 #include "screen_settings.h"
 #include "mic_input.h"
+#include "i2c_bsp.h"
 #include "lvgl.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -24,12 +25,14 @@
 #include "nvs.h"
 #include <math.h>
 #include <stdlib.h>
+#include <string.h>
 
 static const char *TAG = "deskbuddy";
 
 /* ════════════════════ States ═════════════════════════════ */
 typedef enum {
-    DB_NEUTRAL, DB_HAPPY, DB_SAD, DB_SCARED, DB_LOVED
+    DB_NEUTRAL, DB_HAPPY, DB_SAD, DB_SCARED, DB_LOVED,
+    DB_SURPRISED, DB_SLEEPY, DB_CURIOUS, DB_VIBING, DB_ATTENTIVE, DB_DIZZY
 } db_state_t;
 
 /* ════════════════════ Layout constants ═══════════════════ */
@@ -52,11 +55,48 @@ typedef enum {
 #define EYE_SZ_LOVED      45
 #define EYE_R_LOVED       22
 
+/* New state eye dimensions */
+#define EYE_SZ_SURPRISED  65         /* wide open */
+#define EYE_H_SURPRISED   65
+#define EYE_R_SURPRISED   32         /* very round */
+#define EYE_H_SLEEPY      20         /* half-closed droopy */
+#define EYE_R_SLEEPY      10
+#define EYE_H_ATTENTIVE   80         /* big open listening eyes */
+#define EYE_W_ATTENTIVE   60
+#define EYE_R_ATTENTIVE   20
+#define EYE_H_CURIOUS     60         /* medium tall, searching */
+#define EYE_W_CURIOUS     45
+#define EYE_R_CURIOUS     22
+#define EYE_H_VIBING      50         /* relaxed, rolling */
+#define EYE_W_VIBING      55
+#define EYE_R_VIBING      25
+#define EYE_H_DIZZY       55         /* wobbly dizzy eyes */
+#define EYE_W_DIZZY       50
+#define EYE_R_DIZZY       27
+
 /* Animation timing */
 #define BLINK_MS          300
 #define SCARED_MS         3000
 #define LOVED_MS          2000
+#define SURPRISED_MS      1500
+#define SLEEPY_BLINK_MS   600        /* slower blink when sleepy */
+#define CURIOUS_MS        4000       /* looking-around duration  */
+#define VIBING_MS         6000       /* rolling-eyes duration    */
+#define ATTENTIVE_MS      3000       /* big-eyes listening       */
+#define DIZZY_MS          3500       /* dizzy from shaking        */
 #define DECAY_MS          900000     /* 15 min */
+
+/* Ambient sound thresholds */
+#define SPIKE_DELTA       40         /* jump above avg to trigger surprised */
+#define SPIKE_MIN_LEVEL   50         /* minimum absolute level for spike   */
+#define SILENCE_LEVEL     10         /* below this = silence               */
+#define SILENCE_MS        60000      /* 60 s quiet → sleepy                */
+#define LOUD_LEVEL        80         /* sustained loud → scared            */
+#define LOUD_MS           2000       /* how long loud must last            */
+#define TALK_LO           25         /* talking range low                  */
+#define TALK_HI           65         /* talking range high                 */
+#define TALK_MS           5000       /* sustained talking threshold        */
+#define LEVEL_HIST_SZ     10         /* rolling history buffer size        */
 
 /* ════════════════════ Runtime state ══════════════════════ */
 static int      s_happy       = 0;   /* –100 … +100 */
@@ -77,6 +117,32 @@ static bool       s_has_ovr = false;
 /* Auto-save */
 static uint32_t s_last_save = 0;
 
+/* Ambient sound analysis */
+static uint8_t  s_level_hist[LEVEL_HIST_SZ];
+static int      s_hist_idx       = 0;
+static uint32_t s_silence_start  = 0;     /* when silence began        */
+static bool     s_is_silent      = false;
+static uint32_t s_loud_start     = 0;     /* when loud noise began     */
+static bool     s_is_loud        = false;
+static uint32_t s_talk_start     = 0;     /* when talking range began  */
+static bool     s_is_talking     = false;
+static uint32_t s_last_talk_bonus= 0;
+static uint32_t s_last_sleepy_pen= 0;
+static uint32_t s_last_spike     = 0;     /* debounce for spikes       */
+static uint32_t s_last_gesture   = 0;     /* debounce for eye gestures */
+
+/* Eye gesture animation */
+static float    s_eye_y     = 0;          /* vertical offset for gestures */
+static float    s_eye_y_tgt = 0;
+static float    s_roll_phase = 0;         /* phase for rolling eye motion */
+
+/* IMU tilt tracking + shake detection */
+static float    s_tilt_x      = 0;        /* smoothed tilt X offset (px) */
+static float    s_tilt_y      = 0;        /* smoothed tilt Y offset (px) */
+static float    s_gyro_mag    = 0;        /* smoothed gyro magnitude     */
+static uint32_t s_shake_start = 0;
+static bool     s_shaking     = false;
+
 /* ════════════════════ LVGL handles ══════════════════════ */
 static lv_obj_t *scr        = NULL;
 static lv_obj_t *eye_l      = NULL;
@@ -84,13 +150,15 @@ static lv_obj_t *eye_r      = NULL;
 static lv_obj_t *state_lbl  = NULL;
 static lv_obj_t *happy_bar  = NULL;
 static lv_obj_t *happy_lbl  = NULL;
-static lv_obj_t *mic_lbl    = NULL;
 
 /* ════════════════════ Mood melodies ═════════════════════ */
-static const tone_note_t mel_loved[]  = {{523,80},{659,80},{784,80},{1047,200}};
-static const tone_note_t mel_scared[] = {{440,100},{330,100},{220,300}};
-static const tone_note_t mel_happy[]  = {{523,100},{659,100},{784,200}};
-static const tone_note_t mel_sad[]    = {{330,150},{262,150},{196,300}};
+static const tone_note_t mel_loved[]    = {{523,80},{659,80},{784,80},{1047,200}};
+static const tone_note_t mel_scared[]   = {{440,100},{330,100},{220,300}};
+static const tone_note_t mel_happy[]    = {{523,100},{659,100},{784,200}};
+static const tone_note_t mel_sad[]      = {{330,150},{262,150},{196,300}};
+static const tone_note_t mel_surprised[]= {{880,60},{1047,60},{1319,120}};  /* gasp */
+static const tone_note_t mel_yawn[]     = {{392,200},{330,200},{262,300}};  /* sleepy yawn */
+static const tone_note_t mel_dizzy[]    = {{523,60},{392,60},{523,60},{392,60},{262,200}};
 
 /* ════════════════════ Helpers ═══════════════════════════ */
 static uint32_t now_ms(void)
@@ -102,9 +170,18 @@ static db_state_t current_state(void)
 {
     if (s_has_ovr && now_ms() < s_ovr_end) return s_ovr;
     s_has_ovr = false;
+    if (s_is_silent && (now_ms() - s_silence_start >= SILENCE_MS))
+        return DB_SLEEPY;
     if (s_happy >  50) return DB_HAPPY;
     if (s_happy < -50) return DB_SAD;
     return DB_NEUTRAL;
+}
+
+static uint8_t level_avg(void)
+{
+    int sum = 0;
+    for (int i = 0; i < LEVEL_HIST_SZ; i++) sum += s_level_hist[i];
+    return (uint8_t)(sum / LEVEL_HIST_SZ);
 }
 
 static void set_happy(int v)
@@ -157,6 +234,28 @@ void tamafi_load_from_nvs(void)
     }
     s_last_change = now_ms();
     ESP_LOGI(TAG, "DeskBuddy loaded happiness=%d", s_happy);
+}
+
+/* ════════════════════ IMU helpers ═══════════════════════ */
+static void read_imu_data(float *ax_g, float *ay_g, float *gyro_mag_dps)
+{
+    uint8_t buf[6];
+    *ax_g = 0;  *ay_g = 0;  *gyro_mag_dps = 0;
+
+    if (i2c_read_buff(imu_dev_handle, QMI8658_REG_AX_L, buf, 6) == 0) {
+        int16_t ax = (int16_t)((buf[1] << 8) | buf[0]);
+        int16_t ay = (int16_t)((buf[3] << 8) | buf[2]);
+        *ax_g = ax / 4096.0f;
+        *ay_g = ay / 4096.0f;
+    }
+
+    if (i2c_read_buff(imu_dev_handle, QMI8658_REG_GX_L, buf, 6) == 0) {
+        int16_t gx = (int16_t)((buf[1] << 8) | buf[0]);
+        int16_t gy = (int16_t)((buf[3] << 8) | buf[2]);
+        int16_t gz = (int16_t)((buf[5] << 8) | buf[4]);
+        float gxd = gx / 64.0f, gyd = gy / 64.0f, gzd = gz / 64.0f;
+        *gyro_mag_dps = sqrtf(gxd * gxd + gyd * gyd + gzd * gzd);
+    }
 }
 
 /* ════════════════════ Touch callbacks ═══════════════════ */
@@ -263,27 +362,7 @@ void screen_tamafi_create(void)
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 84);
 
-    /* Mic level */
-    mic_lbl = lv_label_create(info);
-    lv_label_set_text(mic_lbl, LV_SYMBOL_AUDIO " Mic: --");
-    lv_obj_set_style_text_font(mic_lbl, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(mic_lbl, lv_color_hex(0x00CCFF), 0);
-    lv_obj_align(mic_lbl, LV_ALIGN_TOP_MID, 0, 104);
-
-    /* Back button */
-    lv_obj_t *back = lv_btn_create(info);
-    lv_obj_set_size(back, 60, 24);
-    lv_obj_align(back, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
-    lv_obj_set_style_bg_color(back, lv_color_hex(th_btn), 0);
-    lv_obj_set_style_radius(back, 8, 0);
-    lv_obj_add_event_cb(back, back_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *bl = lv_label_create(back);
-    lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
-    lv_obj_set_style_text_font(bl, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(bl, lv_color_hex(th_text), 0);
-    lv_obj_center(bl);
-
-    /* ── Face touch zone (top of z-order, left 440 px) ──── */
+    /* ── Face touch zone (left 440 px) ──── */
     lv_obj_t *touch = lv_obj_create(scr);
     lv_obj_remove_style_all(touch);
     lv_obj_set_size(touch, 440, LCD_V_RES);
@@ -293,6 +372,20 @@ void screen_tamafi_create(void)
     lv_obj_add_event_cb(touch, face_tap_cb, LV_EVENT_SHORT_CLICKED, NULL);
     lv_obj_add_event_cb(touch, face_hold_cb, LV_EVENT_LONG_PRESSED, NULL);
 
+    /* ── Back button (top-left, above touch zone) ──── */
+    lv_obj_t *back = lv_btn_create(scr);
+    lv_obj_set_size(back, 56, 26);
+    lv_obj_align(back, LV_ALIGN_TOP_LEFT, 6, 4);
+    lv_obj_set_style_bg_color(back, lv_color_hex(0x333333), 0);
+    lv_obj_set_style_bg_opa(back, LV_OPA_70, 0);
+    lv_obj_set_style_radius(back, 8, 0);
+    lv_obj_add_event_cb(back, back_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *bl = lv_label_create(back);
+    lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
+    lv_obj_set_style_text_font(bl, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(bl, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_center(bl);
+
     /* ── Init animation timers ──── */
     uint32_t t = now_ms();
     s_next_blink = t + 2000 + (esp_random() % 3000);
@@ -300,10 +393,32 @@ void screen_tamafi_create(void)
     s_blinking   = false;
     s_eye_x      = 0;
     s_eye_x_tgt  = 0;
+    s_eye_y      = 0;
+    s_eye_y_tgt  = 0;
+    s_roll_phase = 0;
+    s_last_gesture = 0;
     s_last_save  = t;
+    s_tilt_x     = 0;
+    s_tilt_y     = 0;
+    s_gyro_mag   = 0;
+    s_shake_start = 0;
+    s_shaking    = false;
 
     /* Start microphone */
     mic_start();
+
+    /* Init ambient sound analysis */
+    memset(s_level_hist, 0, sizeof(s_level_hist));
+    s_hist_idx        = 0;
+    s_silence_start   = t;
+    s_is_silent       = true;
+    s_loud_start      = 0;
+    s_is_loud         = false;
+    s_talk_start      = 0;
+    s_is_talking      = false;
+    s_last_talk_bonus = 0;
+    s_last_sleepy_pen = 0;
+    s_last_spike      = 0;
 
     lv_disp_load_scr(scr);
     screen_tamafi_update();
@@ -323,7 +438,6 @@ void screen_tamafi_destroy(void)
         state_lbl = NULL;
         happy_bar = NULL;
         happy_lbl = NULL;
-        mic_lbl   = NULL;
     }
 }
 
@@ -360,6 +474,44 @@ void screen_tamafi_update(void)
     }
     s_eye_x += (s_eye_x_tgt - s_eye_x) * 0.15f;
 
+    /* ── Vertical drift (for gestures) ──── */
+    s_eye_y += (s_eye_y_tgt - s_eye_y) * 0.12f;
+
+    /* ── IMU tilt tracking + shake detection ──── */
+    {
+        float ax_g, ay_g, gyro_mag;
+        read_imu_data(&ax_g, &ay_g, &gyro_mag);
+
+        /* Smooth tilt (maps ±0.5g → ±35px eye offset) */
+        float tx = -ax_g * 70.0f;
+        float ty =  ay_g * 50.0f;
+        if (tx >  35) tx =  35;
+        if (tx < -35) tx = -35;
+        if (ty >  25) ty =  25;
+        if (ty < -25) ty = -25;
+        s_tilt_x += (tx - s_tilt_x) * 0.2f;
+        s_tilt_y += (ty - s_tilt_y) * 0.2f;
+
+        /* Smooth gyro magnitude */
+        s_gyro_mag = s_gyro_mag * 0.7f + gyro_mag * 0.3f;
+
+        /* Shake → Dizzy */
+        if (s_gyro_mag > 150.0f) {
+            if (!s_shaking) { s_shake_start = t; s_shaking = true; }
+            if ((t - s_shake_start > 300) && !s_has_ovr) {
+                s_ovr     = DB_DIZZY;
+                s_ovr_end = t + DIZZY_MS;
+                s_has_ovr = true;
+                s_shaking = false;
+                s_roll_phase = 0;
+                set_happy(s_happy - 3);
+                play_melody_async(mel_dizzy, 5);
+            }
+        } else {
+            s_shaking = false;
+        }
+    }
+
     /* ── Determine state ──── */
     db_state_t st = current_state();
 
@@ -370,20 +522,61 @@ void screen_tamafi_update(void)
     switch (st) {
     case DB_HAPPY:
         ew = EYE_W;  eh = (int)(EYE_H_HAPPY * bf);  er = EYE_R_HAPPY;
-        by = FACE_CY - 15;                      /* raised */
+        by = FACE_CY - 15;
         break;
     case DB_SAD:
         ew = EYE_W;  eh = (int)(EYE_H_SAD * bf);    er = EYE_R_SAD;
-        by = FACE_CY + 15;                      /* lowered */
+        by = FACE_CY + 15;
         break;
     case DB_SCARED:
         ew = EYE_SZ_SCARED;  eh = EYE_SZ_SCARED;  er = EYE_R_SCARED;
-        jx = (int)(esp_random() % 13) - 6;      /* jitter */
+        jx = (int)(esp_random() % 13) - 6;
         jy = (int)(esp_random() % 9) - 4;
         break;
     case DB_LOVED:
         ew = EYE_SZ_LOVED;  eh = (int)(EYE_SZ_LOVED * bf);  er = EYE_R_LOVED;
         ec = EYE_COLOR_RED;
+        break;
+    case DB_SURPRISED:
+        ew = EYE_SZ_SURPRISED;  eh = (int)(EYE_H_SURPRISED * bf);
+        er = EYE_R_SURPRISED;
+        break;
+    case DB_SLEEPY:
+        ew = EYE_W;  eh = (int)(EYE_H_SLEEPY * bf);  er = EYE_R_SLEEPY;
+        by = FACE_CY + 10;
+        break;
+    case DB_ATTENTIVE:
+        /* Big wide eyes — listening intently */
+        ew = EYE_W_ATTENTIVE;  eh = (int)(EYE_H_ATTENTIVE * bf);
+        er = EYE_R_ATTENTIVE;
+        by = FACE_CY - 5;
+        break;
+    case DB_CURIOUS:
+        /* Searching eyes — rapid horizontal + vertical look-around */
+        ew = EYE_W_CURIOUS;  eh = (int)(EYE_H_CURIOUS * bf);
+        er = EYE_R_CURIOUS;
+        /* Override drift with fast searching motion */
+        s_eye_x_tgt = 50.0f * sinf(s_roll_phase * 1.7f);
+        s_eye_y_tgt = 20.0f * cosf(s_roll_phase * 2.3f);
+        s_roll_phase += 0.15f;
+        break;
+    case DB_VIBING:
+        /* Rolling relaxed eyes — smooth circular motion */
+        ew = EYE_W_VIBING;  eh = (int)(EYE_H_VIBING * bf);
+        er = EYE_R_VIBING;
+        jx = (int)(30.0f * sinf(s_roll_phase));
+        jy = (int)(15.0f * cosf(s_roll_phase));
+        s_roll_phase += 0.08f;
+        ec = 0x55FFDD;   /* slightly green tint when vibing */
+        break;
+    case DB_DIZZY:
+        /* Spiral wobble after being shaken */
+        ew = EYE_W_DIZZY;  eh = (int)(EYE_H_DIZZY * bf);
+        er = EYE_R_DIZZY;
+        jx = (int)(25.0f * sinf(s_roll_phase * 3.0f));
+        jy = (int)(15.0f * cosf(s_roll_phase * 2.5f));
+        s_roll_phase += 0.2f;
+        ec = 0xFFFF55;   /* yellowish tint when dizzy */
         break;
     default: /* NEUTRAL */
         ew = EYE_W;  eh = (int)(EYE_H_NEUTRAL * bf);  er = EYE_R_NEUTRAL;
@@ -395,8 +588,8 @@ void screen_tamafi_update(void)
     if (er > ew / 2) er = ew / 2;
 
     /* ── Position eyes ──── */
-    int ox = (int)s_eye_x + jx;
-    int oy = jy;
+    int ox = (int)(s_eye_x + s_tilt_x) + jx;
+    int oy = (int)(s_eye_y + s_tilt_y) + jy;
     int lx = FACE_CX - EYE_GAP / 2 - ew + ox;
     int rx = FACE_CX + EYE_GAP / 2 + ox;
     int ey = by - eh / 2 + oy;
@@ -415,11 +608,17 @@ void screen_tamafi_update(void)
     if (state_lbl) {
         const char *s;
         switch (st) {
-        case DB_HAPPY:   s = "Happy :)";  break;
-        case DB_SAD:     s = "Sad :(";    break;
-        case DB_SCARED:  s = "Scared!";   break;
-        case DB_LOVED:   s = "Loved <3";  break;
-        default:         s = "Neutral ~"; break;
+        case DB_HAPPY:     s = "Happy :)";     break;
+        case DB_SAD:       s = "Sad :(";       break;
+        case DB_SCARED:    s = "Scared!";      break;
+        case DB_LOVED:     s = "Loved <3";     break;
+        case DB_SURPRISED: s = "Surprised!";   break;
+        case DB_SLEEPY:    s = "Sleepy...";    break;
+        case DB_ATTENTIVE: s = "Listening!";   break;
+        case DB_CURIOUS:   s = "What's that?"; break;
+        case DB_VIBING:    s = "Vibing ~";     break;
+        case DB_DIZZY:     s = "Dizzy @_@";    break;
+        default:           s = "Neutral ~";    break;
         }
         lv_label_set_text(state_lbl, s);
     }
@@ -433,21 +632,112 @@ void screen_tamafi_update(void)
     if (happy_lbl)
         lv_label_set_text_fmt(happy_lbl, "%d%%", s_happy);
 
-    /* ── Mic level display + voice reaction ──── */
-    if (mic_lbl) {
+    /* ── Ambient sound → eye gestures ──── */
+    if (mic_is_active()) {
         uint8_t lvl = mic_get_level();
-        if (mic_is_active()) {
-            lv_label_set_text_fmt(mic_lbl, LV_SYMBOL_AUDIO " Mic: %d", lvl);
-            /* Voice > 40 → buddy likes being talked to (+1 happy) */
-            if (lvl > 40 && !s_has_ovr) {
-                static uint32_t s_last_voice = 0;
-                if (t - s_last_voice > 3000) {   /* throttle: every 3 s max */
-                    set_happy(s_happy + 1);
-                    s_last_voice = t;
+
+        /* Update rolling history */
+        s_level_hist[s_hist_idx] = lvl;
+        s_hist_idx = (s_hist_idx + 1) % LEVEL_HIST_SZ;
+        uint8_t avg = level_avg();
+
+        /* --- Spike detection → Surprised (wide eyes) --- */
+        if (lvl >= SPIKE_MIN_LEVEL && (lvl - avg) >= SPIKE_DELTA
+            && !s_has_ovr && (t - s_last_spike > 3000)) {
+            s_ovr     = DB_SURPRISED;
+            s_ovr_end = t + SURPRISED_MS;
+            s_has_ovr = true;
+            s_last_spike = t;
+            s_last_gesture = t;
+            s_roll_phase = 0;
+            set_happy(s_happy + 3);
+            play_melody_async(mel_surprised, 3);
+        }
+        /* --- Very loud sustained → Scared (tiny jittering eyes) --- */
+        else if (lvl > LOUD_LEVEL) {
+            if (!s_is_loud) { s_loud_start = t; s_is_loud = true; }
+            if (t - s_loud_start > LOUD_MS && !s_has_ovr) {
+                s_ovr     = DB_SCARED;
+                s_ovr_end = t + SCARED_MS;
+                s_has_ovr = true;
+                s_last_gesture = t;
+                set_happy(s_happy - 5);
+                play_melody_async(mel_scared, 3);
+                s_is_loud = false;
+            }
+        }
+        /* --- Talking range → Attentive first, then Vibing --- */
+        else if (lvl >= TALK_LO && lvl <= TALK_HI) {
+            s_is_loud = false;
+            if (!s_is_talking) { s_talk_start = t; s_is_talking = true; }
+            uint32_t talk_dur = t - s_talk_start;
+
+            if (talk_dur > TALK_MS && !s_has_ovr && (t - s_last_gesture > 8000)) {
+                /* Sustained conversation → Vibing (rolling eyes, enjoying it) */
+                s_ovr     = DB_VIBING;
+                s_ovr_end = t + VIBING_MS;
+                s_has_ovr = true;
+                s_last_gesture = t;
+                s_roll_phase = 0;
+                if (t - s_last_talk_bonus > 5000) {
+                    set_happy(s_happy + 2);
+                    s_last_talk_bonus = t;
+                }
+            } else if (talk_dur > 1000 && talk_dur <= TALK_MS
+                       && !s_has_ovr && (t - s_last_gesture > 6000)) {
+                /* Starting to hear something → Attentive (big listening eyes) */
+                s_ovr     = DB_ATTENTIVE;
+                s_ovr_end = t + ATTENTIVE_MS;
+                s_has_ovr = true;
+                s_last_gesture = t;
+            }
+            s_is_silent = false;
+        }
+        /* --- Quiet ambient (not silence, not talking) → occasionally Curious --- */
+        else if (lvl >= SILENCE_LEVEL && lvl < TALK_LO) {
+            s_is_loud    = false;
+            s_is_talking = false;
+            s_is_silent  = false;
+            /* Occasional curious look-around when there's light ambient noise */
+            if (!s_has_ovr && (t - s_last_gesture > 15000)) {
+                s_ovr     = DB_CURIOUS;
+                s_ovr_end = t + CURIOUS_MS;
+                s_has_ovr = true;
+                s_last_gesture = t;
+                s_roll_phase = 0;
+            }
+        }
+        /* --- Silence → Sleepy --- */
+        else if (lvl < SILENCE_LEVEL) {
+            s_is_loud    = false;
+            s_is_talking = false;
+            if (!s_is_silent) { s_silence_start = t; s_is_silent = true; }
+            if (t - s_silence_start >= SILENCE_MS) {
+                if (t - s_last_sleepy_pen > 30000) {
+                    set_happy(s_happy - 1);
+                    s_last_sleepy_pen = t;
+                }
+                /* Play yawn once when entering sleepy */
+                if (t - s_silence_start < SILENCE_MS + 200) {
+                    play_melody_async(mel_yawn, 3);
                 }
             }
-        } else {
-            lv_label_set_text(mic_lbl, LV_SYMBOL_AUDIO " Mic: off");
+        }
+        /* --- Any other level --- */
+        else {
+            s_is_loud    = false;
+            s_is_talking = false;
+            s_is_silent  = false;
+        }
+
+        /* Wake up from sleepy when sound arrives */
+        if (s_is_silent && lvl >= TALK_LO) {
+            s_is_silent = false;
+        }
+
+        /* Reset vertical drift when not in a gesture that uses it */
+        if (st != DB_CURIOUS && st != DB_VIBING) {
+            s_eye_y_tgt = 0;
         }
     }
 

@@ -9,6 +9,7 @@ idf_component_register(
          "screens/screen_settings.c"
          "screens/screen_tamafi.c"
          "screens/screen_wifi_cfg.c"
+         "screens/screen_assistant.c"
          "services/wifi_time.c"
          "services/wifi_prov.c"
          "services/weather.c"

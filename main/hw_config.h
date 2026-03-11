@@ -108,15 +108,15 @@
 #define TCA9554_CODEC_PIN_BIT     (1ULL << 6)   /* Codec/mic enable   */
 
 /*=============================================================
- * WiFi Configuration
+ * Credentials & API keys (loaded from secrets.h)
+ * Copy secrets.h.example → secrets.h and fill in your values.
+ * secrets.h is gitignored — never commit real keys.
  *=============================================================*/
-#define WIFI_SSID             "Tarak 2.4_EXT"
-#define WIFI_PASS             "Tarak3385"
+#include "secrets.h"
 
 /*=============================================================
- * Weather Configuration (OpenWeatherMap)
+ * Weather Configuration
  *=============================================================*/
-#define WEATHER_API_KEY       "7935da649d49f72c2ec754f39e0be492"
 #define WEATHER_CITY          "Bengaluru,IN"
 
 /*=============================================================
@@ -125,15 +125,8 @@
 #define FW_VERSION            "ESPro"
 
 /*=============================================================
- * HuggingFace AI Assistant Configuration
- * Free AI using HuggingFace Inference API
- * Based on: github.com/derdacavga/Esp32-Ai-Voice-Assistant
- *
- * 1. Create a free account at https://huggingface.co
- * 2. Go to Settings → Access Tokens → New Token (type: Read)
- * 3. Paste the token below
+ * HuggingFace AI Model
  *=============================================================*/
-#define HF_API_TOKEN          "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"   /* Paste your HuggingFace token (hf_...) */
 #define HF_MODEL              "google/flan-t5-base"
 
 #endif /* HW_CONFIG_H */
