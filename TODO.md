@@ -271,6 +271,30 @@ These items have partial implementations — just need wiring or small fixes.
 - **Effort:** Small
 - **Status:** ⬜
 
+### 8.4 Background Key-Send (Jabra-style)
+- **File:** `main/services/macropad.c`, `main/core/app_manager.c`
+- **Issue:** Macro keys only work while the macropad overlay is open. BLE connection tears down when leaving the screen. Jabra headsets work from any screen because hardware buttons are always available.
+- **Fix:**
+  - Keep BLE HID connection alive in background (don't disconnect on overlay close)
+  - Add boot button gestures routed through `app_manager.c`:
+    - **Double-press** → mic toggle (send BLE HID keypress from any screen)
+    - **Long-press (2s)** → end meeting
+  - Keep `key_send_task` + `s_key_queue` running even when overlay is closed
+  - Optional: tilt gesture (quick wrist flip) → video toggle
+- **Effort:** Medium
+- **Status:** ⬜
+
+### 8.5 Live App Status Sync (Jabra-style)
+- **File:** `main/services/macropad.c`, `main/screens/screen_clock.c`
+- **Issue:** Mic/video status indicators only visible inside macropad overlay. No way to see meeting state from clock or other screens.
+- **Fix:**
+  - **WiFi UDP status receiver always-on:** Run `state_rx_task` (port 13580) at all times, not just when overlay is open. PC listener sends `"mic:0"`, `"video:1"` etc.
+  - **BLE+WiFi hybrid mode:** Use BLE for key-send (no PC software needed) + WiFi UDP for status feedback from PC listener
+  - **Persistent status on clock face:** Show small mic/video icons on clock screen using global `g_mic_on` / `g_video_on` flags updated by `state_rx_task`
+  - **Note:** Standard BLE HID is one-way (watch→PC). True bidirectional BLE would need a custom GATT characteristic + companion app on PC.
+- **Effort:** Medium-Large
+- **Status:** ⬜
+
 ---
 
 ## 9. STORAGE-ENABLED FEATURES (Unlocked by Section 0)
