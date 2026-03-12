@@ -150,7 +150,7 @@ void play_melody(const tone_note_t *notes, int count)
                     env = (float)i / 80.0f;
                 if (i > nsamp - 80)
                     env = (float)(nsamp - i) / 80.0f;
-                buf[i] = (int16_t)(sinf(w * t) * env * 28000.0f);
+                buf[i] = (int16_t)(sinf(w * t) * env * 10000.0f);
             }
         }
 

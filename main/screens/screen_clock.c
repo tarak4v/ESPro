@@ -11,6 +11,7 @@
 
 #include "screen_clock.h"
 #include "screen_settings.h"
+#include "app_manager.h"
 #include "hw_config.h"
 #include "i2c_bsp.h"
 #include "wifi_time.h"
@@ -40,6 +41,7 @@ static lv_obj_t *weather_loc    = NULL;
 /* Flip clock digit labels (4 digit cards: HH MM) */
 static lv_obj_t *flip_digit[4]  = {NULL};
 static lv_obj_t *flip_colon     = NULL;
+static char      flip_prev[4]   = {'?','?','?','?'}; /* previous digits for anim */
 
 static const char *weekday_names[] = {
     "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"
@@ -128,7 +130,8 @@ static void init_styles(void)
     lv_style_set_bg_color(&style_glass, lv_color_hex(th_card));
     lv_style_set_bg_opa(&style_glass, g_theme_dark ? LV_OPA_80 : LV_OPA_COVER);
     lv_style_set_border_color(&style_glass,
-                              lv_color_hex(g_theme_dark ? 0x333355 : 0xCCCCDD));
+                              lv_color_hex(g_theme_dark ? g_face.glass_border_d
+                                                        : g_face.glass_border_l));
     lv_style_set_border_width(&style_glass, 1);
     lv_style_set_border_opa(&style_glass, LV_OPA_60);
     lv_style_set_radius(&style_glass, 16);
@@ -139,7 +142,9 @@ static void init_styles(void)
     lv_style_set_pad_all(&style_glass, 12);
 
     lv_style_init(&style_dot_active);
-    lv_style_set_bg_color(&style_dot_active, lv_color_hex(0x00DDFF));
+    lv_style_set_bg_color(&style_dot_active,
+                          lv_color_hex(g_theme_dark ? g_face.accent_d
+                                                    : g_face.accent_l));
     lv_style_set_bg_opa(&style_dot_active, LV_OPA_COVER);
     lv_style_set_radius(&style_dot_active, LV_RADIUS_CIRCLE);
     lv_style_set_width(&style_dot_active, 8);
@@ -151,6 +156,24 @@ static void init_styles(void)
     lv_style_set_radius(&style_dot_inactive, LV_RADIUS_CIRCLE);
     lv_style_set_width(&style_dot_inactive, 6);
     lv_style_set_height(&style_dot_inactive, 6);
+}
+
+/* ── Flip-card appear animation (opacity flash) ──────────── */
+static void flip_anim_opa_cb(void *obj, int32_t v)
+{
+    lv_obj_set_style_opa((lv_obj_t *)obj, (lv_opa_t)v, 0);
+}
+
+static void flip_card_animate(lv_obj_t *card)
+{
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_var(&a, card);
+    lv_anim_set_exec_cb(&a, flip_anim_opa_cb);
+    lv_anim_set_values(&a, 60, 255);
+    lv_anim_set_time(&a, 350);
+    lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+    lv_anim_start(&a);
 }
 
 /* ── Helper: create one flip-digit card ───────────────────── */
@@ -197,14 +220,14 @@ void screen_clock_create(void)
     lv_obj_add_style(scr, &style_bg, 0);
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
-    /* Theme-aware text colours */
-    uint32_t c_time   = g_theme_dark ? 0xEEEEFF : 0x1A1A2E;
-    uint32_t c_ampm   = g_theme_dark ? 0x6688AA : 0x5577AA;
-    uint32_t c_date   = g_theme_dark ? 0x7788AA : 0x556688;
-    uint32_t c_wkday  = g_theme_dark ? 0x00BBDD : 0x0088AA;
-    uint32_t c_wdesc  = g_theme_dark ? 0x8899BB : 0x5566AA;
-    uint32_t c_wloc   = g_theme_dark ? 0x556688 : 0x445577;
-    uint32_t c_ico_df = g_theme_dark ? 0x444466 : 0xAAAACC;
+    /* Theme-aware text colours — from active watch face */
+    uint32_t c_time   = g_theme_dark ? g_face.time_d   : g_face.time_l;
+    uint32_t c_ampm   = g_theme_dark ? g_face.ampm_d   : g_face.ampm_l;
+    uint32_t c_date   = g_theme_dark ? g_face.date_d   : g_face.date_l;
+    uint32_t c_wkday  = g_theme_dark ? g_face.weekday_d: g_face.weekday_l;
+    uint32_t c_wdesc  = g_theme_dark ? g_face.wdesc_d  : g_face.wdesc_l;
+    uint32_t c_wloc   = g_theme_dark ? g_face.wloc_d   : g_face.wloc_l;
+    uint32_t c_ico_df = g_theme_dark ? g_face.icon_d   : g_face.icon_l;
 
     /* ── Status bar (WiFi + BT icons, top-left) ──── */
     wifi_icon = lv_label_create(scr);
@@ -316,7 +339,8 @@ void screen_clock_create(void)
     weather_temp = lv_label_create(right_panel);
     lv_label_set_text(weather_temp, "--\xC2\xB0""C");
     lv_obj_set_style_text_font(weather_temp, &lv_font_montserrat_48, 0);
-    lv_obj_set_style_text_color(weather_temp, lv_color_hex(0xFFCC44), 0);
+    lv_obj_set_style_text_color(weather_temp,
+        lv_color_hex(g_theme_dark ? g_face.wtemp_d : g_face.wtemp_l), 0);
     lv_obj_align(weather_temp, LV_ALIGN_CENTER, 0, -22);
 
     /* Weather description */
@@ -353,7 +377,7 @@ void screen_clock_create(void)
             lv_obj_add_style(mode_dot[i], &style_dot_inactive, 0);
     }
 
-    lv_disp_load_scr(scr);
+    g_pending_scr = scr;
     screen_clock_update();
     ESP_LOGI(TAG, "Clock screen created (%s, %s theme)",
              g_clock_flip ? "flip" : "digital",
@@ -373,6 +397,7 @@ void screen_clock_destroy(void)
         for (int i = 0; i < 2; i++) mode_dot[i] = NULL;
         for (int i = 0; i < 4; i++) flip_digit[i] = NULL;
         flip_colon    = NULL;
+        memset(flip_prev, '?', sizeof(flip_prev));
         wifi_icon     = NULL;
         bt_icon       = NULL;
         weather_temp  = NULL;
@@ -402,12 +427,18 @@ void screen_clock_update(void)
         if (ampm_label) lv_label_set_text(ampm_label, ampm);
     }
     if (flip_digit[0]) {
-        /* Flip clock: update individual digit labels */
+        /* Flip clock: update individual digit labels + animate on change */
         char d[2] = {0, 0};
         for (int i = 0; i < 4; i++) {
             int bi = (i < 2) ? i : i + 1;  /* skip ':' at index 2 */
             d[0] = buf[bi];
-            lv_label_set_text(flip_digit[i], d);
+            if (d[0] != flip_prev[i]) {
+                lv_label_set_text(flip_digit[i], d);
+                /* Animate the card (parent of the label) */
+                lv_obj_t *card = lv_obj_get_parent(flip_digit[i]);
+                if (card) flip_card_animate(card);
+                flip_prev[i] = d[0];
+            }
         }
     } else if (time_label) {
         lv_label_set_text(time_label, buf);

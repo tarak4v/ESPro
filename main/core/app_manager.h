@@ -22,6 +22,9 @@ typedef enum {
     MODE_COUNT
 } app_mode_t;
 
+/** New screen pointer — set by each screen's create() function. */
+extern lv_obj_t *g_pending_scr;
+
 /** Initialise the app manager; creates the first screen (clock). */
 void app_manager_init(lv_indev_t *touch_indev);
 

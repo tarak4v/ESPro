@@ -151,7 +151,7 @@ void screen_wifi_cfg_create(void)
     /* Start provisioning */
     wifi_prov_start();
 
-    lv_disp_load_scr(scr);
+    g_pending_scr = scr;
     s_dot_phase = 0;
     s_last_tick = lv_tick_get();
     ESP_LOGI(TAG, "WiFi config screen created");

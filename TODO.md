@@ -1,8 +1,41 @@
 # ESPro SmartWatch — Actionable Roadmap
 
-> **Last updated:** Based on commit d4a8a0f  
+> **Last updated:** 2026-03-12  
 > **Overall completion:** ~85%  
 > **Legend:** ⬜ Not started · 🟡 Needs discussion · ✅ Done  
+
+---
+
+## 0. EXPAND SPIFFS PARTITION (Top Priority — Next Item)
+
+### 0.1 Reclaim Unused Flash for Storage
+- **File:** `partitions.csv`
+- **Issue:** Board has **16 MB flash** but only ~8.5 MB is used (8M app + 512K SPIFFS + 28K NVS/PHY). **~7 MB of flash is wasted.**
+- **Board note:** No SD card slot — SPIFFS is the only file storage available.
+- **Fix:** Expand SPIFFS partition from 512K → 7M:
+  ```csv
+  nvs,       data, nvs,     ,       0x6000,
+  phy_init,  data, phy,     ,       0x1000,
+  factory,   app,  factory, ,       8M,
+  storage,   data, spiffs,  ,       7M,
+  ```
+- **Impact:** 14× more storage (512K → 7 MB) — unlocks offline music cache, game assets, voice memos, enhanced logging, and custom watch faces.
+- **Risk:** Requires full flash erase and re-flash (`idf.py erase-flash flash`). NVS settings will be lost.
+- **Effort:** Tiny (1-line change + re-flash)
+- **Status:** ✅ Done — partition expanded to 7M with `littlefs` subtype
+
+### 0.2 Consider LittleFS Instead of SPIFFS
+- **Issue:** SPIFFS has no directory support, poor wear leveling, and degrades on large partitions. LittleFS is better suited for 7 MB.
+- **Fix:** Switch to `esp_littlefs` component — drop-in replacement with directory support, better performance, and proper wear leveling.
+- **Effort:** Small (add component, change mount calls in `sd_log.c`)
+- **Status:** ✅ Done — migrated to `joltwallet/littlefs` v1.20.4 (`sd_log.c`, `CMakeLists.txt`, `idf_component.yml`)
+
+### 0.3 Enable PSRAM for WiFi/LWIP Buffers
+- **File:** `sdkconfig`
+- **Issue:** `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP` is disabled. WiFi/TLS buffers consume ~50 KB of precious internal RAM.
+- **Fix:** Set `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y` to move WiFi buffers to the 8 MB Octal PSRAM.
+- **Effort:** Tiny (menuconfig change)
+- **Status:** ✅ Done — enabled in `sdkconfig.defaults` and `sdkconfig`
 
 ---
 
@@ -45,7 +78,18 @@ These items have partial implementations — just need wiring or small fixes.
   - (c) Remove compass name, rename to "Sensors" or "Motion"
 - **Status:** 🟡
 
-### 2.2 IMU Gesture Recognition
+### 2.2 IMU Accelerometer Calibration
+- **File:** New utility `main/core/imu_cal.c` or integrate into `game_maze.c`
+- **Issue:** Accelerometer has bias offset — ball drifts when device is flat on table.
+- **Fix:**
+  - Sample ~50 readings with device flat (detect flat: `az ≈ 1.0g`, `ax/ay ≈ 0.0g`)
+  - Store `ax_avg`, `ay_avg` as bias offsets, subtract from every reading
+  - Persist offsets to NVS (survive reboot)
+  - Add "Calibrate IMU" button in settings or prompt at game start
+- **Effort:** Small-Medium
+- **Status:** ⬜
+
+### 2.3 IMU Gesture Recognition
 - **File:** New utility or extend `main/core/main.c`
 - **Possible gestures using QMI8658 accel/gyro:**
   - **Shake** → shuffle music station / dismiss notification
@@ -81,20 +125,20 @@ These items have partial implementations — just need wiring or small fixes.
 - **Issue:** Screen switches are instant (destroy old → create new). No visual feedback.
 - **Fix:** Add slide animation (LVGL `lv_scr_load_anim()`) for swipe transitions between clock ↔ menu.
 - **Effort:** Small-Medium
-- **Status:** ⬜
+- **Status:** ✅ Done — 300ms slide-left/right animations in `app_manager.c`, deferred old-screen destroy via LVGL timer
 
 ### 4.2 Flip Clock — Full Animation
 - **File:** `main/screens/screen_clock.c`
 - **Issue:** Flip clock toggle exists in settings and digit frames are defined, but the actual flip animation (top-half / bottom-half split with rotation) may need polish.
 - **Fix:** Verify the flip animation renders properly. Test switching between digital/flip modes.
-- **Status:** 🟡
+- **Status:** ✅ Done — opacity-flash animation on digit change via `lv_anim_t`, tracks previous digits
 
 ### 4.3 Light Theme Rendering
 - **File:** Multiple screen files
 - **Issue:** Theme toggle (dark/light) saves to NVS, but all screen UIs are hard-coded with dark colors. Light theme may look broken (white text on white background).
 - **Fix:** Audit each screen's `_create()` function — use `g_theme_dark` to pick colors. Define a color palette struct.
 - **Effort:** Medium-Large
-- **Status:** ⬜
+- **Status:** ✅ Done — `screen_compass.c` fully themed, `screen_menu.c` title uses `th_text`, `screen_tamafi.c` bg/back-button uses theme vars
 
 ### 4.4 Long Text Scrolling
 - **Issue:** AI assistant responses can be long. The response label on the 640×172 screen may truncate.
@@ -130,14 +174,14 @@ These items have partial implementations — just need wiring or small fixes.
 - **Issue:** Current TTS downloads full WAV before playing. Noticeable delay for long responses.
 - **Idea:** Stream-and-play: start playback as soon as first audio chunk arrives (similar to music player ring buffer approach).
 - **Effort:** Large
-- **Status:** ⬜
+- **Status:** ✅ Done — rewrote TTS to stream WAV from HTTP directly to I2S (1KB header + 4KB streaming buffer vs 512KB)
 
 ### 5.4 Error Recovery & Retry
 - **File:** `main/screens/screen_assistant.c`
 - **Issue:** If Groq API times out or returns error, user gets stuck.
 - **Fix:** Add timeout handling, retry once, then show error message and return to IDLE state.
 - **Effort:** Small
-- **Status:** ⬜
+- **Status:** ✅ Done — LLM & TTS retry once on failure, processing timeout bumped to 60s, errors return to IDLE
 
 ---
 
@@ -229,66 +273,108 @@ These items have partial implementations — just need wiring or small fixes.
 
 ---
 
-## 9. NEW FEATURE IDEAS
+## 9. STORAGE-ENABLED FEATURES (Unlocked by Section 0)
 
-### 9.1 Notifications (BLE)
+### 9.0 Offline Music Cache
+- **File:** `main/audio/music_player.c`
+- **Prereq:** Section 0.1 (expanded SPIFFS/LittleFS)
+- **Idea:** Cache recently streamed JioSaavn songs to flash. 5-7 MB can hold 1-2 compressed songs for offline playback when WiFi is unavailable.
+- **Approach:** Save decoded audio chunks to files, detect WiFi-down and play from cache.
+- **Effort:** Medium-Large
+- **Status:** ⬜
+
+### 9.01 Custom Watch Faces / Themes
+- **Prereq:** Section 0.1
+- **Idea:** Store multiple bitmap/image assets for user-selectable watch face skins. LVGL image assets (PNG/BIN) loaded from the expanded partition.
+- **Effort:** Medium
+- **Status:** ✅ Done — 5 face skins (Default, Ember, Forest, Royal, Minimal) as JSON on LittleFS, selector UI in settings, clock screen uses `g_face` colors
+
+### 9.02 Voice Memos
+- **Prereq:** Section 0.1
+- **Idea:** Record short voice memos using the ES7210 ADC mic input (GPIO 6). Store as raw PCM or WAV files in flash. Playback through speaker.
+- **Effort:** Medium
+- **Status:** ⬜
+
+### 9.03 Game Assets & Level Packs
+- **Prereq:** Section 0.1
+- **Idea:** Store maze level definitions, sprites, sound effects as files. Save game state, high scores, user progress. Add more games with pre-built level packs.
+- **Effort:** Medium
+- **Status:** ⬜
+
+### 9.04 Offline Weather / Data Cache
+- **Prereq:** Section 0.1
+- **Idea:** Cache weather data, calendar events, reminders, and notes for offline viewing when WiFi is unavailable.
+- **Effort:** Small
+- **Status:** ⬜
+
+### 9.05 Alarm / Notification Sounds
+- **Prereq:** Section 0.1
+- **Idea:** Store custom alarm tones, notification sounds, and boot sounds as audio files in flash instead of hardcoded arrays.
+- **Effort:** Small
+- **Status:** ⬜
+
+---
+
+## 10. NEW FEATURE IDEAS
+
+### 10.1 Notifications (BLE)
 - **Issue:** No phone notification mirroring.
 - **Idea:** BLE ANCS (Apple) or BLE notification forwarding from Android companion app. Show caller name, message preview on watch.
 - **Effort:** Very Large
 - **Status:** 🟡
 
-### 9.2 Stopwatch / Timer
+### 10.2 Stopwatch / Timer
 - **Issue:** Clock screen has time only. No stopwatch or countdown timer.
 - **Fix:** Add as sub-mode of clock screen or new app in menu.
 - **Effort:** Medium
 - **Status:** ⬜
 
-### 9.3 Pomodoro Timer
+### 10.3 Pomodoro Timer
 - **Idea:** Work/break timer (25/5 min) with sound alert. Useful for productivity.
 - **Effort:** Small-Medium
 - **Status:** ⬜
 
-### 9.4 Step Counter / Pedometer
+### 10.4 Step Counter / Pedometer
 - **Issue:** IMU available but not used for health tracking.
 - **Fix:** Simple step counter using accelerometer peak detection. Display daily count on clock face.
 - **Effort:** Medium
 - **Status:** ⬜
 
-### 9.5 Alarm Clock
+### 10.5 Alarm Clock
 - **Issue:** No alarm functionality despite having RTC + speaker.
 - **Fix:** Set alarm via settings UI (hour:min), trigger melody when RTC matches. Could also wake from deep sleep.
 - **Effort:** Medium
 - **Status:** ⬜
 
-### 9.6 OTA Firmware Update
-- **Issue:** Partition table is OTA-ready but no OTA implementation.
-- **Fix:** Add HTTP OTA update screen — download firmware from GitHub releases via WiFi.
+### 10.6 OTA Firmware Update
+- **Issue:** Current partition table has no OTA partition. Needs restructuring if OTA staging area is desired.
+- **Fix:** Add HTTP OTA update screen — download firmware from GitHub releases via WiFi. Add `ota_0` + `ota_1` partitions.
 - **Effort:** Medium-Large
 - **Status:** ⬜
 
-### 9.7 QR Code Display
+### 10.7 QR Code Display
 - **Idea:** Generate QR codes on screen (WiFi sharing, URL, contact info). Useful for quick setup sharing.
 - **Effort:** Small (many QR libraries for ESP32)
 - **Status:** 🟡
 
 ---
 
-## 10. CODE QUALITY & MAINTENANCE
+## 11. CODE QUALITY & MAINTENANCE
 
-### 10.1 Screen Menu Size
+### 11.1 Screen Menu Size
 - **File:** `main/screens/screen_menu.c`
 - **Issue:** Very large file (~2000+ LOC) handling 7 app overlays.
 - **Fix:** Extract overlay UIs into separate files (music_overlay.c, macropad_overlay.c, etc.).
 - **Effort:** Medium
 - **Status:** 🟡
 
-### 10.2 Magic Numbers
+### 11.2 Magic Numbers
 - **Issue:** Constants like `ACCEL_SCALE = 3.5`, `BALL_R = 6`, buffer sizes scattered throughout code without explanation.
 - **Fix:** Document non-obvious constants with brief comments where needed.
 - **Effort:** Small
 - **Status:** ⬜
 
-### 10.3 README Update
+### 11.3 README Update
 - **File:** `README.md`
 - **Issue:** Likely outdated given all recent feature additions.
 - **Fix:** Update with current feature list, build instructions, hardware setup, screenshots.
@@ -301,10 +387,11 @@ These items have partial implementations — just need wiring or small fixes.
 
 | Priority | Items | Why |
 |----------|-------|-----|
-| **P0 — Do now** | 1.1 (brightness NVS), 5.4 (assistant error recovery), 4.4 (text scroll) | Quick fixes, immediate UX improvement |
-| **P1 — Next sprint** | 6.0 (JioSaavn streams), 1.2 (error logging), 4.1 (transitions), 4.3 (light theme), 5.1 (conversation history), 6.1 (now-playing) | Curated content + quality improvements |
-| **P2 — Nice to have** | 2.2 (gestures), 3.1 (sleep mode), 6.2 (favorites), 7.1 (animations), 8.1-8.3 (macropad), 9.2-9.5 (timer/steps/alarm) | Feature expansion |
-| **P3 — Someday** | 5.2 (wake word), 5.3 (streaming TTS), 9.1 (notifications), 9.6 (OTA), 7.2 (pet learning) | Complex, research-heavy |
+| **P0 — Do now** | **0.1 (expand SPIFFS to 7M)**, 0.3 (PSRAM WiFi buffers), 1.1 (brightness NVS) | Unlock storage features, free internal RAM, quick fix |
+| **P1 — Next sprint** | 0.2 (LittleFS eval), 1.2 (error logging), 5.4 (assistant error recovery), 4.4 (text scroll), 4.1 (transitions) | Quality + storage foundation |
+| **P2 — Build on storage** | 9.0 (offline music cache), 9.01 (watch faces), 9.02 (voice memos), 9.04 (offline data), 9.05 (custom sounds) | Storage-enabled features |
+| **P3 — Feature expansion** | 2.2 (IMU cal), 2.3 (gestures), 3.1 (sleep mode), 6.2 (favorites), 7.1 (animations), 8.1-8.3 (macropad), 10.2-10.5 (timer/steps/alarm) | Feature expansion |
+| **P4 — Someday** | 5.2 (wake word), 5.3 (streaming TTS), 10.1 (notifications), 10.6 (OTA), 7.2 (pet learning) | Complex, research-heavy |
 
 ---
 

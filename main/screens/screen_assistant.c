@@ -76,11 +76,11 @@ static const char *TAG = "assistant";
                          "Keep responses under 40 words — they will be shown " \
                          "on a tiny 640x172 pixel screen. Be friendly, direct, and useful."
 
-/* Groq TTS */
+/* Groq TTS (Orpheus) */
 #define GROQ_TTS_URL    "https://api.groq.com/openai/v1/audio/speech"
-#define GROQ_TTS_MODEL  "playai-tts"
-#define GROQ_TTS_VOICE  "Fritz-PlayAI"
-#define TTS_MAX_AUDIO   (512 * 1024)   /* 512 KB max TTS WAV response */
+#define GROQ_TTS_MODEL  "canopylabs/orpheus-v1-english"
+#define GROQ_TTS_VOICE  "daniel"
+#define GROQ_TTS_MAX_INPUT 200   /* Orpheus API limit */
 
 /* ================================================================
  *  State machine
@@ -132,7 +132,7 @@ static TaskHandle_t s_http_task_h = NULL;
 
 /* ── Failsafe: watchdog for stuck PROCESSING state ── */
 static uint32_t s_processing_start = 0;
-#define PROCESSING_TIMEOUT_MS  45000   /* 45 s max for STT+LLM */
+#define PROCESSING_TIMEOUT_MS  60000   /* 60 s max for STT+LLM+retry */
 
 /* ================================================================
  *  Colour palette per state
@@ -516,114 +516,127 @@ static void http_task(void *arg)
 
     /* ──────────────────────────────────────────────
      *  Step 2: Call Groq LLM (Chat Completions)
+     *  Retry once on connection or server error.
      * ────────────────────────────────────────────── */
-    ESP_LOGI(TAG, "LLM: sending prompt...");
+    for (int llm_try = 0; llm_try < 2 && !s_abort; llm_try++) {
+        if (llm_try > 0) {
+            ESP_LOGW(TAG, "LLM: retry %d...", llm_try + 1);
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            s_response[0] = '\0';
+        }
+        ESP_LOGI(TAG, "LLM: sending prompt...");
 
-    /* Build JSON request */
-    cJSON *req = cJSON_CreateObject();
-    cJSON_AddStringToObject(req, "model", GROQ_LLM_MODEL);
-    cJSON_AddNumberToObject(req, "max_tokens", 150);
-    cJSON_AddNumberToObject(req, "temperature", 0.7);
-    cJSON *msgs = cJSON_AddArrayToObject(req, "messages");
-    cJSON *sys_msg = cJSON_CreateObject();
-    cJSON_AddStringToObject(sys_msg, "role", "system");
-    cJSON_AddStringToObject(sys_msg, "content", SYSTEM_PROMPT);
-    cJSON_AddItemToArray(msgs, sys_msg);
-    cJSON *usr_msg = cJSON_CreateObject();
-    cJSON_AddStringToObject(usr_msg, "role", "user");
-    cJSON_AddStringToObject(usr_msg, "content", s_transcript);
-    cJSON_AddItemToArray(msgs, usr_msg);
+        /* Build JSON request */
+        cJSON *req = cJSON_CreateObject();
+        cJSON_AddStringToObject(req, "model", GROQ_LLM_MODEL);
+        cJSON_AddNumberToObject(req, "max_tokens", 150);
+        cJSON_AddNumberToObject(req, "temperature", 0.7);
+        cJSON *msgs = cJSON_AddArrayToObject(req, "messages");
+        cJSON *sys_msg = cJSON_CreateObject();
+        cJSON_AddStringToObject(sys_msg, "role", "system");
+        cJSON_AddStringToObject(sys_msg, "content", SYSTEM_PROMPT);
+        cJSON_AddItemToArray(msgs, sys_msg);
+        cJSON *usr_msg = cJSON_CreateObject();
+        cJSON_AddStringToObject(usr_msg, "role", "user");
+        cJSON_AddStringToObject(usr_msg, "content", s_transcript);
+        cJSON_AddItemToArray(msgs, usr_msg);
 
-    char *req_str = cJSON_PrintUnformatted(req);
-    cJSON_Delete(req);
-    if (!req_str) {
-        snprintf(s_error, sizeof(s_error), "JSON build failed");
-        goto done;
-    }
-    size_t req_len = strlen(req_str);
+        char *req_str = cJSON_PrintUnformatted(req);
+        cJSON_Delete(req);
+        if (!req_str) {
+            snprintf(s_error, sizeof(s_error), "JSON build failed");
+            goto done;
+        }
+        size_t req_len = strlen(req_str);
 
-    /* Reset response buffer */
-    rb.len = 0;
-    memset(json_buf, 0, MAX_JSON_RESP);
+        /* Reset response buffer */
+        rb.len = 0;
+        memset(json_buf, 0, MAX_JSON_RESP);
 
-    esp_http_client_config_t llm_cfg = {
-        .url                = GROQ_CHAT_URL,
-        .method             = HTTP_METHOD_POST,
-        .timeout_ms         = 60000,
-        .buffer_size        = 4096,
-        .buffer_size_tx     = 4096,
-        .crt_bundle_attach  = esp_crt_bundle_attach,
-        .event_handler      = http_event_handler,
-        .user_data          = &rb,
-    };
-    client = esp_http_client_init(&llm_cfg);
-    esp_http_client_set_header(client, "Authorization", auth_hdr);
-    esp_http_client_set_header(client, "Content-Type", "application/json");
+        esp_http_client_config_t llm_cfg = {
+            .url                = GROQ_CHAT_URL,
+            .method             = HTTP_METHOD_POST,
+            .timeout_ms         = 60000,
+            .buffer_size        = 4096,
+            .buffer_size_tx     = 4096,
+            .crt_bundle_attach  = esp_crt_bundle_attach,
+            .event_handler      = http_event_handler,
+            .user_data          = &rb,
+        };
+        client = esp_http_client_init(&llm_cfg);
+        esp_http_client_set_header(client, "Authorization", auth_hdr);
+        esp_http_client_set_header(client, "Content-Type", "application/json");
 
-    err = esp_http_client_open(client, req_len);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "LLM connection failed: %s", esp_err_to_name(err));
-        snprintf(s_error, sizeof(s_error), "LLM connect failed");
+        err = esp_http_client_open(client, req_len);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "LLM connect failed: %s", esp_err_to_name(err));
+            snprintf(s_error, sizeof(s_error), "LLM connect failed");
+            free(req_str);
+            esp_http_client_cleanup(client);
+            continue;  /* retry */
+        }
+
+        esp_http_client_write(client, req_str, req_len);
         free(req_str);
+
+        if (s_abort) { esp_http_client_close(client); esp_http_client_cleanup(client); goto done; }
+
+        esp_http_client_fetch_headers(client);
+        status = esp_http_client_get_status_code(client);
+
+        while (1) {
+            int n = esp_http_client_read(client, json_buf + rb.len, MAX_JSON_RESP - 1 - rb.len);
+            if (n <= 0) break;
+            rb.len += n;
+        }
+        json_buf[rb.len] = '\0';
+
+        esp_http_client_close(client);
         esp_http_client_cleanup(client);
-        goto done;
-    }
 
-    esp_http_client_write(client, req_str, req_len);
-    free(req_str);
+        ESP_LOGI(TAG, "LLM HTTP %d, response: %.300s", status, json_buf);
 
-    if (s_abort) { esp_http_client_close(client); esp_http_client_cleanup(client); goto done; }
+        if (status != 200) {
+            snprintf(s_error, sizeof(s_error), "LLM error (%d)", status);
+            continue;  /* retry */
+        }
 
-    esp_http_client_fetch_headers(client);
-    status = esp_http_client_get_status_code(client);
-
-    while (1) {
-        int n = esp_http_client_read(client, json_buf + rb.len, MAX_JSON_RESP - 1 - rb.len);
-        if (n <= 0) break;
-        rb.len += n;
-    }
-    json_buf[rb.len] = '\0';
-
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
-
-    ESP_LOGI(TAG, "LLM HTTP %d, response: %.300s", status, json_buf);
-
-    if (status != 200) {
-        snprintf(s_error, sizeof(s_error), "LLM error (%d)", status);
-        goto done;
-    }
-
-    /* Parse LLM response */
-    cJSON *llm_root = cJSON_Parse(json_buf);
-    if (!llm_root) {
-        snprintf(s_error, sizeof(s_error), "LLM JSON parse error");
-        goto done;
-    }
-    cJSON *choices = cJSON_GetObjectItem(llm_root, "choices");
-    if (choices && cJSON_IsArray(choices) && cJSON_GetArraySize(choices) > 0) {
-        cJSON *first = cJSON_GetArrayItem(choices, 0);
-        cJSON *message = cJSON_GetObjectItem(first, "message");
-        if (message) {
-            cJSON *content = cJSON_GetObjectItem(message, "content");
-            if (content && cJSON_IsString(content) && content->valuestring) {
-                strncpy(s_response, content->valuestring, sizeof(s_response) - 1);
-                s_response[sizeof(s_response) - 1] = '\0';
+        /* Parse LLM response */
+        cJSON *llm_root = cJSON_Parse(json_buf);
+        if (!llm_root) {
+            snprintf(s_error, sizeof(s_error), "LLM JSON parse error");
+            continue;  /* retry */
+        }
+        cJSON *choices = cJSON_GetObjectItem(llm_root, "choices");
+        if (choices && cJSON_IsArray(choices) && cJSON_GetArraySize(choices) > 0) {
+            cJSON *first = cJSON_GetArrayItem(choices, 0);
+            cJSON *message = cJSON_GetObjectItem(first, "message");
+            if (message) {
+                cJSON *content = cJSON_GetObjectItem(message, "content");
+                if (content && cJSON_IsString(content) && content->valuestring) {
+                    strncpy(s_response, content->valuestring, sizeof(s_response) - 1);
+                    s_response[sizeof(s_response) - 1] = '\0';
+                }
             }
         }
-    }
-    cJSON_Delete(llm_root);
+        cJSON_Delete(llm_root);
 
-    ESP_LOGI(TAG, "[LLM] %s", s_response);
+        ESP_LOGI(TAG, "[LLM] %s", s_response);
 
-    if (s_response[0]) {
-        s_http_ok = true;
-    } else {
+        if (s_response[0]) {
+            s_http_ok = true;
+            break;  /* success — exit retry loop */
+        }
+
         snprintf(s_error, sizeof(s_error), "Empty LLM response");
+        /* fall through to retry */
     }
+
+    if (!s_http_ok) goto done;  /* all retries exhausted */
 
     /* ──────────────────────────────────────────────
-     *  Step 3: TTS — synthesize & play speech via Groq
+     *  Step 3: TTS — stream-and-play speech via Groq
+     *  (WAV header parsed first, then PCM streamed to I2S)
      * ────────────────────────────────────────────── */
     if (s_http_ok && !s_abort) {
         /* Free JSON buffer early — not needed anymore */
@@ -631,11 +644,22 @@ static void http_task(void *arg)
         /* Signal UI to show text right away */
         s_http_done = true;
 
-        ESP_LOGI(TAG, "TTS: synthesizing speech...");
+        ESP_LOGI(TAG, "TTS: synthesizing speech (streaming)...");
+
+        /* Truncate input to 200 chars (Orpheus API limit) at word boundary */
+        char tts_input[GROQ_TTS_MAX_INPUT + 1];
+        strncpy(tts_input, s_response, GROQ_TTS_MAX_INPUT);
+        tts_input[GROQ_TTS_MAX_INPUT] = '\0';
+        if (strlen(s_response) > GROQ_TTS_MAX_INPUT) {
+            /* Cut at last space to avoid mid-word truncation */
+            char *sp = strrchr(tts_input, ' ');
+            if (sp && sp > tts_input + GROQ_TTS_MAX_INPUT / 2)
+                *sp = '\0';
+        }
 
         cJSON *tts_req = cJSON_CreateObject();
         cJSON_AddStringToObject(tts_req, "model", GROQ_TTS_MODEL);
-        cJSON_AddStringToObject(tts_req, "input", s_response);
+        cJSON_AddStringToObject(tts_req, "input", tts_input);
         cJSON_AddStringToObject(tts_req, "voice", GROQ_TTS_VOICE);
         cJSON_AddStringToObject(tts_req, "response_format", "wav");
         char *tts_body = cJSON_PrintUnformatted(tts_req);
@@ -643,13 +667,6 @@ static void http_task(void *arg)
 
         if (!tts_body) goto done;
         size_t tts_body_len = strlen(tts_body);
-
-        uint8_t *audio_buf = heap_caps_malloc(TTS_MAX_AUDIO, MALLOC_CAP_SPIRAM);
-        if (!audio_buf) {
-            ESP_LOGE(TAG, "TTS: audio buffer alloc failed");
-            free(tts_body);
-            goto done;
-        }
 
         esp_http_client_config_t tts_cfg = {
             .url               = GROQ_TTS_URL,
@@ -659,70 +676,100 @@ static void http_task(void *arg)
             .buffer_size_tx    = 4096,
             .crt_bundle_attach = esp_crt_bundle_attach,
         };
-        esp_http_client_handle_t tts_client = esp_http_client_init(&tts_cfg);
-        esp_http_client_set_header(tts_client, "Authorization", auth_hdr);
-        esp_http_client_set_header(tts_client, "Content-Type", "application/json");
+        esp_http_client_handle_t tts_client = NULL;
+        int tts_status = 0;
+        bool tts_connected = false;
 
-        err = esp_http_client_open(tts_client, tts_body_len);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "TTS: connect failed: %s", esp_err_to_name(err));
+        for (int tts_try = 0; tts_try < 2 && !s_abort; tts_try++) {
+            if (tts_try > 0) {
+                ESP_LOGW(TAG, "TTS: retry %d...", tts_try + 1);
+                vTaskDelay(pdMS_TO_TICKS(1000));
+            }
+
+            tts_client = esp_http_client_init(&tts_cfg);
+            esp_http_client_set_header(tts_client, "Authorization", auth_hdr);
+            esp_http_client_set_header(tts_client, "Content-Type", "application/json");
+
+            err = esp_http_client_open(tts_client, tts_body_len);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "TTS: connect failed: %s", esp_err_to_name(err));
+                esp_http_client_cleanup(tts_client);
+                tts_client = NULL;
+                continue;  /* retry */
+            }
+
+            esp_http_client_write(tts_client, tts_body, tts_body_len);
+
+            esp_http_client_fetch_headers(tts_client);
+            tts_status = esp_http_client_get_status_code(tts_client);
+
+            if (tts_status == 200) {
+                tts_connected = true;
+                break;  /* success */
+            }
+
+            /* Read error body for diagnostics */
+            char err_body[256] = {0};
+            esp_http_client_read(tts_client, err_body, sizeof(err_body) - 1);
+            ESP_LOGE(TAG, "TTS: HTTP %d — %s", tts_status, err_body);
+            esp_http_client_close(tts_client);
             esp_http_client_cleanup(tts_client);
-            free(tts_body);
-            heap_caps_free(audio_buf);
+            tts_client = NULL;
+            /* retry */
+        }
+
+        free(tts_body);
+
+        if (!tts_connected || !tts_client) {
+            ESP_LOGE(TAG, "TTS: failed after retries");
             goto done;
         }
 
-        esp_http_client_write(tts_client, tts_body, tts_body_len);
-        free(tts_body);
-
-        esp_http_client_fetch_headers(tts_client);
-        int tts_status = esp_http_client_get_status_code(tts_client);
-
-        size_t audio_len = 0;
-        if (tts_status == 200) {
-            while (audio_len < TTS_MAX_AUDIO && !s_abort) {
-                int n = esp_http_client_read(tts_client,
-                            (char *)audio_buf + audio_len,
-                            TTS_MAX_AUDIO - audio_len);
-                if (n <= 0) break;
-                audio_len += n;
-            }
-            ESP_LOGI(TAG, "TTS: received %u bytes audio", (unsigned)audio_len);
-        } else {
-            ESP_LOGE(TAG, "TTS: HTTP %d", tts_status);
+        /* ── Read WAV header + find "data" chunk (stream first 1 KB) ── */
+        #define TTS_HDR_BUF  1024
+        #define TTS_CHUNK_SZ 4096
+        uint8_t *hdr_buf = heap_caps_malloc(TTS_HDR_BUF, MALLOC_CAP_SPIRAM);
+        uint8_t *pcm_buf = heap_caps_malloc(TTS_CHUNK_SZ, MALLOC_CAP_SPIRAM);
+        if (!hdr_buf || !pcm_buf) {
+            ESP_LOGE(TAG, "TTS: stream buffer alloc failed");
+            heap_caps_free(hdr_buf); heap_caps_free(pcm_buf);
+            esp_http_client_close(tts_client);
+            esp_http_client_cleanup(tts_client);
+            goto done;
         }
 
-        esp_http_client_close(tts_client);
-        esp_http_client_cleanup(tts_client);
+        /* Fill header buffer from network */
+        size_t hdr_len = 0;
+        while (hdr_len < TTS_HDR_BUF && !s_abort) {
+            int n = esp_http_client_read(tts_client,
+                        (char *)hdr_buf + hdr_len, TTS_HDR_BUF - hdr_len);
+            if (n <= 0) break;
+            hdr_len += n;
+            if (hdr_len >= 44) break;   /* have enough for WAV header */
+        }
 
-        /* ── Play WAV audio through ES8311 DAC ── */
-        if (audio_len > 44 && !s_abort) {
+        bool tts_played = false;
+        if (hdr_len >= 44 && !s_abort) {
             uint32_t wav_sr;
-            uint16_t wav_ch, wav_bps;
-            memcpy(&wav_sr,  audio_buf + 24, 4);
-            memcpy(&wav_ch,  audio_buf + 22, 2);
-            memcpy(&wav_bps, audio_buf + 34, 2);
-            ESP_LOGI(TAG, "TTS WAV: %luHz %uch %ubps",
-                     (unsigned long)wav_sr, wav_ch, wav_bps);
+            uint16_t wav_ch;
+            memcpy(&wav_sr, hdr_buf + 24, 4);
+            memcpy(&wav_ch, hdr_buf + 22, 2);
+            ESP_LOGI(TAG, "TTS WAV: %luHz %uch (streaming)", (unsigned long)wav_sr, wav_ch);
 
-            /* Find "data" chunk in WAV */
+            /* Find "data" chunk */
             size_t data_off = 12;
-            size_t data_size = 0;
-            while (data_off + 8 <= audio_len) {
+            while (data_off + 8 <= hdr_len) {
                 uint32_t chunk_sz;
-                memcpy(&chunk_sz, audio_buf + data_off + 4, 4);
-                if (memcmp(audio_buf + data_off, "data", 4) == 0) {
+                memcpy(&chunk_sz, hdr_buf + data_off + 4, 4);
+                if (memcmp(hdr_buf + data_off, "data", 4) == 0) {
                     data_off += 8;
-                    data_size = chunk_sz;
-                    if (data_off + data_size > audio_len)
-                        data_size = audio_len - data_off;
                     break;
                 }
                 data_off += 8 + chunk_sz;
-                if (chunk_sz & 1) data_off++;  /* padding byte */
+                if (chunk_sz & 1) data_off++;
             }
 
-            if (data_size > 0 && !s_abort) {
+            if (data_off <= hdr_len && !s_abort) {
                 /* Enable PA */
                 if (io_expander_handle)
                     esp_io_expander_set_level(io_expander_handle,
@@ -731,7 +778,6 @@ static void http_task(void *arg)
 
                 i2s_chan_handle_t tx = mic_get_shared_i2s_tx();
                 if (tx) {
-                    /* Explicitly reconfigure I2S TX for TTS sample rate */
                     i2s_channel_disable(tx);
                     i2s_std_clk_config_t clk_cfg =
                         I2S_STD_CLK_DEFAULT_CONFIG(wav_sr);
@@ -743,7 +789,7 @@ static void http_task(void *arg)
                     i2s_channel_reconfig_std_slot(tx, &slot_cfg);
                     i2s_channel_enable(tx);
 
-                    /* Set up ES8311 codec for TTS sample rate */
+                    /* Set up ES8311 codec */
                     audio_codec_i2c_cfg_t i2c_cfg = {
                         .addr       = ES8311_CODEC_DEFAULT_ADDR,
                         .bus_handle = i2c_port0_bus_handle,
@@ -763,6 +809,7 @@ static void http_task(void *arg)
                     };
                     const audio_codec_if_t *codec = es8311_codec_new(&es_cfg);
 
+                    esp_codec_dev_handle_t dev = NULL;
                     if (codec) {
                         audio_codec_i2s_cfg_t data_cfg = {
                             .port = 0, .tx_handle = tx,
@@ -774,7 +821,7 @@ static void http_task(void *arg)
                             .codec_if = codec, .data_if = data,
                             .dev_type = ESP_CODEC_DEV_TYPE_OUT,
                         };
-                        esp_codec_dev_handle_t dev = esp_codec_dev_new(&dev_cfg);
+                        dev = esp_codec_dev_new(&dev_cfg);
 
                         esp_codec_dev_sample_info_t fs = {
                             .bits_per_sample = 16,
@@ -785,28 +832,47 @@ static void http_task(void *arg)
                         esp_codec_dev_open(dev, &fs);
                         esp_codec_dev_set_out_vol(dev, g_volume * 100 / 255);
 
-                        /* Stereo → mono downmix in-place if needed */
-                        uint8_t *pcm = audio_buf + data_off;
-                        size_t pcm_len = data_size;
+                        tts_played = true;
 
-                        if (wav_ch == 2 && wav_bps == 16) {
-                            size_t mono_samples = pcm_len / 4;
-                            int16_t *src = (int16_t *)pcm;
-                            for (size_t i = 0; i < mono_samples; i++)
-                                src[i] = (int16_t)(((int32_t)src[2*i]
-                                                   + src[2*i+1]) / 2);
-                            pcm_len = mono_samples * 2;
+                        /* ── Play leftover PCM from header buffer ── */
+                        size_t leftover = hdr_len - data_off;
+                        if (leftover > 0) {
+                            uint8_t *p = hdr_buf + data_off;
+                            if (wav_ch == 2) {
+                                size_t mono_n = leftover / 4;
+                                int16_t *s16 = (int16_t *)p;
+                                for (size_t i = 0; i < mono_n; i++)
+                                    s16[i] = (int16_t)(((int32_t)s16[2*i]
+                                                       + s16[2*i+1]) / 2);
+                                leftover = mono_n * 2;
+                            }
+                            size_t written;
+                            i2s_channel_write(tx, p, leftover,
+                                              &written, pdMS_TO_TICKS(500));
                         }
 
-                        /* Write PCM in chunks */
-                        size_t pos = 0;
-                        while (pos < pcm_len && !s_abort) {
-                            size_t to_write = pcm_len - pos;
-                            if (to_write > 4096) to_write = 4096;
-                            size_t written;
-                            i2s_channel_write(tx, pcm + pos, to_write,
-                                              &written, pdMS_TO_TICKS(500));
-                            pos += written;
+                        /* ── Stream: HTTP → downmix → I2S ── */
+                        while (!s_abort) {
+                            int n = esp_http_client_read(tts_client,
+                                        (char *)pcm_buf, TTS_CHUNK_SZ);
+                            if (n <= 0) break;
+                            uint8_t *wp = pcm_buf;
+                            size_t wlen = (size_t)n;
+                            if (wav_ch == 2) {
+                                size_t mono_n = wlen / 4;
+                                int16_t *s16 = (int16_t *)pcm_buf;
+                                for (size_t i = 0; i < mono_n; i++)
+                                    s16[i] = (int16_t)(((int32_t)s16[2*i]
+                                                       + s16[2*i+1]) / 2);
+                                wlen = mono_n * 2;
+                            }
+                            size_t pos = 0;
+                            while (pos < wlen && !s_abort) {
+                                size_t written;
+                                i2s_channel_write(tx, wp + pos, wlen - pos,
+                                                  &written, pdMS_TO_TICKS(500));
+                                pos += written;
+                            }
                         }
 
                         /* Flush with silence */
@@ -818,12 +884,22 @@ static void http_task(void *arg)
                         esp_codec_dev_close(dev);
                         esp_codec_dev_delete(dev);
                     }
-                    /* Disable TX after TTS playback */
                     i2s_channel_disable(tx);
                 }
+                /* Disable PA after playback */
+                if (io_expander_handle)
+                    esp_io_expander_set_level(io_expander_handle,
+                                              TCA9554_PA_PIN_BIT, 0);
             }
         }
-        heap_caps_free(audio_buf);
+
+        if (!tts_played)
+            ESP_LOGW(TAG, "TTS: could not parse WAV header or play audio");
+
+        heap_caps_free(hdr_buf);
+        heap_caps_free(pcm_buf);
+        esp_http_client_close(tts_client);
+        esp_http_client_cleanup(tts_client);
     }
 
 done:

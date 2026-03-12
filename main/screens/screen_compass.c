@@ -8,6 +8,7 @@
  */
 
 #include "screen_compass.h"
+#include "screen_settings.h"
 #include "hw_config.h"
 #include "i2c_bsp.h"
 #include "lvgl.h"
@@ -91,26 +92,26 @@ static lv_style_t style_dot_inactive;
 static void init_styles(void)
 {
     lv_style_init(&style_bg);
-    lv_style_set_bg_color(&style_bg, lv_color_hex(0x050510));
+    lv_style_set_bg_color(&style_bg, lv_color_hex(th_bg));
     lv_style_set_bg_opa(&style_bg, LV_OPA_COVER);
 
     lv_style_init(&style_data);
-    lv_style_set_text_color(&style_data, lv_color_hex(0x66AAFF));
+    lv_style_set_text_color(&style_data, lv_color_hex(g_theme_dark ? 0x66AAFF : 0x2266CC));
     lv_style_set_text_font(&style_data, &lv_font_montserrat_12);
 
     lv_style_init(&style_angle);
-    lv_style_set_text_color(&style_angle, lv_color_hex(0xFFCC44));
+    lv_style_set_text_color(&style_angle, lv_color_hex(g_theme_dark ? 0xFFCC44 : 0xCC8800));
     lv_style_set_text_font(&style_angle, &lv_font_montserrat_20);
 
     lv_style_init(&style_dot_active);
-    lv_style_set_bg_color(&style_dot_active, lv_color_hex(0x66AAFF));
+    lv_style_set_bg_color(&style_dot_active, lv_color_hex(g_theme_dark ? 0x66AAFF : 0x2266CC));
     lv_style_set_bg_opa(&style_dot_active, LV_OPA_COVER);
     lv_style_set_radius(&style_dot_active, LV_RADIUS_CIRCLE);
     lv_style_set_width(&style_dot_active, 8);
     lv_style_set_height(&style_dot_active, 8);
 
     lv_style_init(&style_dot_inactive);
-    lv_style_set_bg_color(&style_dot_inactive, lv_color_hex(0x333333));
+    lv_style_set_bg_color(&style_dot_inactive, lv_color_hex(th_btn));
     lv_style_set_bg_opa(&style_dot_inactive, LV_OPA_COVER);
     lv_style_set_radius(&style_dot_inactive, LV_RADIUS_CIRCLE);
     lv_style_set_width(&style_dot_inactive, 6);
@@ -133,7 +134,7 @@ void screen_compass_create(void)
     /* Title */
     lv_obj_t *title = lv_label_create(scr);
     lv_label_set_text(title, LV_SYMBOL_GPS " IMU");
-    lv_obj_set_style_text_color(title, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(th_text), 0);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 4);
 
@@ -175,7 +176,7 @@ void screen_compass_create(void)
     static lv_point_t line_pts[2] = {{0, 86}, {640, 86}};
     horizon_line = lv_line_create(scr);
     lv_line_set_points(horizon_line, line_pts, 2);
-    lv_obj_set_style_line_color(horizon_line, lv_color_hex(0x44FF44), 0);
+    lv_obj_set_style_line_color(horizon_line, lv_color_hex(g_theme_dark ? 0x44FF44 : 0x228822), 0);
     lv_obj_set_style_line_width(horizon_line, 2, 0);
     lv_obj_set_style_line_opa(horizon_line, LV_OPA_40, 0);
 

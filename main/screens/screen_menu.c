@@ -28,6 +28,7 @@
 #include <string.h>
 #include <stdio.h>
 #include "game_maze.h"
+#include "game_race.h"
 #include "music_player.h"
 #include "macropad.h"
 #include "screen_assistant.h"
@@ -98,6 +99,7 @@ static void open_wifi_overlay(void);
 static void open_ble_overlay(void);
 static void open_led_overlay(void);
 static void open_ai_overlay(void);
+static void open_game_picker(void);
 
 /* ── Close overlay ────────────────────────────────────────── */
 static void back_btn_cb(lv_event_t *e) { (void)e; close_overlay(); }
@@ -856,6 +858,81 @@ static void open_led_overlay(void)
     led_on = false;
 }
 
+/* ── Game picker overlay ──────────────────────────────────── */
+static void game_pick_maze_cb(lv_event_t *e)
+{
+    (void)e;
+    close_overlay();
+    game_maze_open(scr);
+}
+
+static void game_pick_race_cb(lv_event_t *e)
+{
+    (void)e;
+    close_overlay();
+    game_race_open(scr);
+}
+
+static void open_game_picker(void)
+{
+    if (overlay) close_overlay();
+    overlay = lv_obj_create(scr);
+    lv_obj_remove_style_all(overlay);
+    lv_obj_set_size(overlay, LCD_H_RES, LCD_V_RES);
+    lv_obj_align(overlay, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(overlay, lv_color_hex(0x0A0A14), 0);
+    lv_obj_set_style_bg_opa(overlay, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    /* Back button */
+    lv_obj_t *back = lv_btn_create(overlay);
+    lv_obj_set_size(back, 60, 28);
+    lv_obj_align(back, LV_ALIGN_TOP_LEFT, 6, 4);
+    lv_obj_set_style_bg_color(back, lv_color_hex(0x333333), 0);
+    lv_obj_set_style_radius(back, 8, 0);
+    lv_obj_add_event_cb(back, back_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *bl = lv_label_create(back);
+    lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
+    lv_obj_set_style_text_font(bl, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(bl, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_center(bl);
+
+    /* Title */
+    lv_obj_t *title = lv_label_create(overlay);
+    lv_label_set_text(title, LV_SYMBOL_PLAY "  Games");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 6);
+
+    /* Two game cards side by side */
+    static const struct { const char *name; const char *icon; uint32_t col; } games[] = {
+        { "Tilt Maze",  LV_SYMBOL_SHUFFLE,  0x880E4F },
+        { "Traffic Rider", LV_SYMBOL_RIGHT,  0x1565C0 },
+    };
+    lv_event_cb_t cbs[] = { game_pick_maze_cb, game_pick_race_cb };
+
+    for (int i = 0; i < 2; i++) {
+        lv_obj_t *card = lv_btn_create(overlay);
+        lv_obj_set_size(card, 180, 100);
+        lv_obj_set_pos(card, 130 + i * 210, 40);
+        lv_obj_set_style_bg_color(card, lv_color_hex(games[i].col), 0);
+        lv_obj_set_style_radius(card, 14, 0);
+        lv_obj_add_event_cb(card, cbs[i], LV_EVENT_CLICKED, NULL);
+
+        lv_obj_t *icon = lv_label_create(card);
+        lv_label_set_text(icon, games[i].icon);
+        lv_obj_set_style_text_font(icon, &lv_font_montserrat_28, 0);
+        lv_obj_set_style_text_color(icon, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_align(icon, LV_ALIGN_CENTER, 0, -12);
+
+        lv_obj_t *name = lv_label_create(card);
+        lv_label_set_text(name, games[i].name);
+        lv_obj_set_style_text_font(name, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(name, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_align(name, LV_ALIGN_BOTTOM_MID, 0, -6);
+    }
+}
+
 /* ── Card tap callback ────────────────────────────────────── */
 /* Pending overlay request from settings screen */
 static volatile int s_pending_overlay = -1;   /* -1=none, 0=BLE, 1=WiFi */
@@ -870,7 +947,7 @@ static void card_click_cb(lv_event_t *e)
     switch (idx) {
         case 0: open_led_overlay();     break;
         case 1: screen_assistant_open(scr); break;
-        case 2: game_maze_open(scr);    break;
+        case 2: game_race_open(scr);    break;  /* Traffic Rider directly */
         case 3: music_player_open(scr); break;
         case 4: app_manager_set_mode(MODE_TAMAFI); break;
         case 5: macropad_open(scr);     break;
@@ -951,9 +1028,12 @@ void screen_menu_update(void)
         }
     }
 
-    /* Maze game tick */
+    /* Game ticks */
     if (game_maze_is_active()) {
         game_maze_update();
+    }
+    if (game_race_is_active()) {
+        game_race_update();
     }
 
     /* Music player tick */
@@ -979,7 +1059,7 @@ void screen_menu_create(void)
 
     lv_obj_t *title = lv_label_create(scr);
     lv_label_set_text(title, "Apps");
-    lv_obj_set_style_text_color(title, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(th_text), 0);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 4);
 
@@ -1037,7 +1117,7 @@ void screen_menu_create(void)
             lv_obj_add_style(mode_dot[i], &style_dot_inactive, 0);
     }
 
-    lv_disp_load_scr(scr);
+    g_pending_scr = scr;
     ESP_LOGI(TAG, "Menu screen created");
 }
 
@@ -1046,6 +1126,7 @@ void screen_menu_destroy(void)
 {
     if (scr) {
         game_maze_close();
+        game_race_close();
         music_player_close();
         macropad_close();
         overlay = NULL; led_btn = NULL; led_btn_lbl = NULL; led_on = false;

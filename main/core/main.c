@@ -411,6 +411,13 @@ void app_main(void)
     /* Load persistent settings from NVS (volume, boot sound, 24h) */
     settings_load_from_nvs();
 
+    /* Mount LittleFS early — needed for watch face files */
+    sd_log_init();
+
+    /* Load watch face skin from LittleFS */
+    face_init_defaults();
+    face_load(g_watch_face);
+
     /* Load TamaFi pet state from NVS */
     tamafi_load_from_nvs();
 
@@ -438,9 +445,6 @@ void app_main(void)
 
     /* Weather background task */
     weather_init();
-
-    /* SPIFFS log storage */
-    sd_log_init();
 
     ESP_LOGI(TAG, "Starting app update task on core 1");
     xTaskCreatePinnedToCore(app_update_task, "AppMgr", 4096, NULL, 3, NULL, 1);

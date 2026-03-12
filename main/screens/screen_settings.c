@@ -22,8 +22,10 @@
 #include "esp_wifi.h"
 #include "nvs_flash.h"
 #include "nvs.h"
+#include "cJSON.h"
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 static const char *TAG = "settings";
 
@@ -36,6 +38,22 @@ bool     g_boot_sound_en = true;
 bool     g_clock_24h     = false;
 bool     g_theme_dark    = true;     /* true = dark (default) */
 bool     g_clock_flip    = false;    /* false = digital (default) */
+uint8_t  g_watch_face    = 0;       /* active face index */
+
+/* ── Current face colours (loaded from LittleFS JSON) ────── */
+watch_face_t g_face = {
+    .name = "Default",
+    .time_d = 0xEEEEFF,    .time_l = 0x1A1A2E,
+    .ampm_d = 0x6688AA,    .ampm_l = 0x5577AA,
+    .date_d = 0x7788AA,    .date_l = 0x556688,
+    .weekday_d = 0x00BBDD, .weekday_l = 0x0088AA,
+    .wtemp_d = 0xFFCC44,   .wtemp_l = 0xCC8800,
+    .wdesc_d = 0x8899BB,   .wdesc_l = 0x5566AA,
+    .wloc_d = 0x556688,    .wloc_l = 0x445577,
+    .accent_d = 0x00DDFF,  .accent_l = 0x00AACC,
+    .glass_border_d = 0x333355, .glass_border_l = 0xCCCCDD,
+    .icon_d = 0x444466,    .icon_l = 0xAAAACC,
+};
 
 /* ── Theme palette ────────────────────────────────────────── */
 uint32_t th_bg   = 0x0A0A14;
@@ -55,6 +73,125 @@ void theme_apply(void)
     }
 }
 
+/* ══════════════════════════════════════════════════════════════
+ *  Watch face skin files on LittleFS (/log/faces/)
+ * ══════════════════════════════════════════════════════════════ */
+#define FACE_DIR "/log/faces"
+
+static const char * const s_face_json[WATCH_FACE_COUNT] = {
+    /* 0 — Default (Tesla Glassy Cyan) */
+    "{\"name\":\"Default\","
+    "\"time\":[\"EEEEFF\",\"1A1A2E\"],\"ampm\":[\"6688AA\",\"5577AA\"],"
+    "\"date\":[\"7788AA\",\"556688\"],\"wkday\":[\"00BBDD\",\"0088AA\"],"
+    "\"wtemp\":[\"FFCC44\",\"CC8800\"],\"wdesc\":[\"8899BB\",\"5566AA\"],"
+    "\"wloc\":[\"556688\",\"445577\"],\"accent\":[\"00DDFF\",\"00AACC\"],"
+    "\"glass\":[\"333355\",\"CCCCDD\"],\"icon\":[\"444466\",\"AAAACC\"]}",
+    /* 1 — Ember (Warm Orange) */
+    "{\"name\":\"Ember\","
+    "\"time\":[\"FFDDAA\",\"3D2B1F\"],\"ampm\":[\"CC8855\",\"996633\"],"
+    "\"date\":[\"AA8866\",\"775544\"],\"wkday\":[\"FF8844\",\"CC5522\"],"
+    "\"wtemp\":[\"FFAA00\",\"CC7700\"],\"wdesc\":[\"CC9977\",\"886644\"],"
+    "\"wloc\":[\"886644\",\"664422\"],\"accent\":[\"FF6633\",\"CC4411\"],"
+    "\"glass\":[\"443322\",\"DDCCBB\"],\"icon\":[\"665544\",\"BBAA99\"]}",
+    /* 2 — Forest (Green Nature) */
+    "{\"name\":\"Forest\","
+    "\"time\":[\"CCFFCC\",\"1A3D1A\"],\"ampm\":[\"66AA77\",\"448855\"],"
+    "\"date\":[\"7799AA\",\"557766\"],\"wkday\":[\"44CC66\",\"228844\"],"
+    "\"wtemp\":[\"BBDD44\",\"889922\"],\"wdesc\":[\"88AA88\",\"557755\"],"
+    "\"wloc\":[\"557755\",\"446644\"],\"accent\":[\"44DD66\",\"22AA44\"],"
+    "\"glass\":[\"334433\",\"BBDDBB\"],\"icon\":[\"446644\",\"99BB99\"]}",
+    /* 3 — Royal (Purple & Gold) */
+    "{\"name\":\"Royal\","
+    "\"time\":[\"DDCCFF\",\"2A1A3D\"],\"ampm\":[\"9988BB\",\"776699\"],"
+    "\"date\":[\"8877AA\",\"665588\"],\"wkday\":[\"BB88DD\",\"8855AA\"],"
+    "\"wtemp\":[\"FFD700\",\"CC9900\"],\"wdesc\":[\"AA88CC\",\"775599\"],"
+    "\"wloc\":[\"776699\",\"554477\"],\"accent\":[\"FFD700\",\"CC9900\"],"
+    "\"glass\":[\"443355\",\"DDCCEE\"],\"icon\":[\"554466\",\"AA99BB\"]}",
+    /* 4 — Minimal (Monochrome) */
+    "{\"name\":\"Minimal\","
+    "\"time\":[\"FFFFFF\",\"000000\"],\"ampm\":[\"888888\",\"666666\"],"
+    "\"date\":[\"999999\",\"555555\"],\"wkday\":[\"AAAAAA\",\"444444\"],"
+    "\"wtemp\":[\"FFFFFF\",\"000000\"],\"wdesc\":[\"999999\",\"555555\"],"
+    "\"wloc\":[\"666666\",\"444444\"],\"accent\":[\"888888\",\"666666\"],"
+    "\"glass\":[\"333333\",\"CCCCCC\"],\"icon\":[\"555555\",\"999999\"]}",
+};
+
+void face_init_defaults(void)
+{
+    struct stat st;
+    if (stat(FACE_DIR, &st) != 0) {
+        mkdir(FACE_DIR, 0755);
+    }
+    for (int i = 0; i < WATCH_FACE_COUNT; i++) {
+        char path[32];
+        snprintf(path, sizeof(path), FACE_DIR "/face_%d.json", i);
+        if (stat(path, &st) == 0) continue;   /* already exists */
+        FILE *f = fopen(path, "w");
+        if (f) {
+            fputs(s_face_json[i], f);
+            fclose(f);
+            ESP_LOGI(TAG, "Wrote default face %d", i);
+        }
+    }
+}
+
+static uint32_t hex_to_u32(const char *s)
+{
+    if (!s) return 0;
+    return (uint32_t)strtoul(s, NULL, 16);
+}
+
+static void parse_pair(cJSON *root, const char *key,
+                       uint32_t *dark, uint32_t *light)
+{
+    cJSON *arr = cJSON_GetObjectItem(root, key);
+    if (arr && cJSON_IsArray(arr) && cJSON_GetArraySize(arr) >= 2) {
+        *dark  = hex_to_u32(cJSON_GetArrayItem(arr, 0)->valuestring);
+        *light = hex_to_u32(cJSON_GetArrayItem(arr, 1)->valuestring);
+    }
+}
+
+void face_load(uint8_t idx)
+{
+    if (idx >= WATCH_FACE_COUNT) idx = 0;
+    char path[32];
+    snprintf(path, sizeof(path), FACE_DIR "/face_%d.json", idx);
+
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        ESP_LOGW(TAG, "Face file %s not found — using defaults", path);
+        return;   /* keep g_face at compiled defaults */
+    }
+    char buf[512];
+    size_t len = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[len] = '\0';
+
+    cJSON *root = cJSON_Parse(buf);
+    if (!root) {
+        ESP_LOGE(TAG, "Face JSON parse failed");
+        return;
+    }
+
+    cJSON *name = cJSON_GetObjectItem(root, "name");
+    if (name && cJSON_IsString(name))
+        snprintf(g_face.name, sizeof(g_face.name), "%s", name->valuestring);
+
+    parse_pair(root, "time",   &g_face.time_d,   &g_face.time_l);
+    parse_pair(root, "ampm",   &g_face.ampm_d,   &g_face.ampm_l);
+    parse_pair(root, "date",   &g_face.date_d,   &g_face.date_l);
+    parse_pair(root, "wkday",  &g_face.weekday_d, &g_face.weekday_l);
+    parse_pair(root, "wtemp",  &g_face.wtemp_d,  &g_face.wtemp_l);
+    parse_pair(root, "wdesc",  &g_face.wdesc_d,  &g_face.wdesc_l);
+    parse_pair(root, "wloc",   &g_face.wloc_d,   &g_face.wloc_l);
+    parse_pair(root, "accent", &g_face.accent_d,  &g_face.accent_l);
+    parse_pair(root, "glass",  &g_face.glass_border_d, &g_face.glass_border_l);
+    parse_pair(root, "icon",   &g_face.icon_d,   &g_face.icon_l);
+
+    cJSON_Delete(root);
+    ESP_LOGI(TAG, "Loaded face %d: %s", idx, g_face.name);
+}
+
 /* ── NVS helpers ──────────────────────────────────────────── */
 #define NVS_NS  "settings"
 
@@ -68,6 +205,7 @@ static void settings_load(void)
         if (nvs_get_u8(h, "clk24h",  &v) == ESP_OK) g_clock_24h     = v;
         if (nvs_get_u8(h, "theme",   &v) == ESP_OK) g_theme_dark    = v;
         if (nvs_get_u8(h, "clkflip", &v) == ESP_OK) g_clock_flip    = v;
+        if (nvs_get_u8(h, "face",    &v) == ESP_OK) g_watch_face    = v;
         nvs_close(h);
     }
     theme_apply();
@@ -147,6 +285,29 @@ static void clock_flip_cb(lv_event_t *e)
     lv_obj_t *sw = lv_event_get_target(e);
     g_clock_flip = lv_obj_has_state(sw, LV_STATE_CHECKED);
     settings_save_u8("clkflip", g_clock_flip ? 1 : 0);
+}
+
+/* ── Watch face selector ──── */
+static lv_obj_t *face_name_lbl = NULL;
+
+static void face_prev_cb(lv_event_t *e)
+{
+    (void)e;
+    g_watch_face = (g_watch_face + WATCH_FACE_COUNT - 1) % WATCH_FACE_COUNT;
+    face_load(g_watch_face);
+    settings_save_u8("face", g_watch_face);
+    if (face_name_lbl)
+        lv_label_set_text(face_name_lbl, g_face.name);
+}
+
+static void face_next_cb(lv_event_t *e)
+{
+    (void)e;
+    g_watch_face = (g_watch_face + 1) % WATCH_FACE_COUNT;
+    face_load(g_watch_face);
+    settings_save_u8("face", g_watch_face);
+    if (face_name_lbl)
+        lv_label_set_text(face_name_lbl, g_face.name);
 }
 
 static void reboot_cb(lv_event_t *e)
@@ -324,6 +485,41 @@ void screen_settings_create(void)
     lv_obj_set_style_text_font(wifi_lbl, &lv_font_montserrat_12, 0);
     lv_obj_set_pos(wifi_lbl, 240, 78);
 
+    /* ── Watch Face selector ──── */
+    lv_obj_t *face_title = lv_label_create(scr);
+    lv_label_set_text(face_title, LV_SYMBOL_IMAGE " Watch Face");
+    lv_obj_add_style(face_title, &style_label, 0);
+    lv_obj_set_pos(face_title, 240, 110);
+
+    lv_obj_t *fp = lv_btn_create(scr);
+    lv_obj_set_size(fp, 26, 22);
+    lv_obj_set_pos(fp, 240, 128);
+    lv_obj_set_style_bg_color(fp, lv_color_hex(th_btn), 0);
+    lv_obj_set_style_radius(fp, 6, 0);
+    lv_obj_add_event_cb(fp, face_prev_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *fpl = lv_label_create(fp);
+    lv_label_set_text(fpl, LV_SYMBOL_LEFT);
+    lv_obj_set_style_text_font(fpl, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(fpl, lv_color_hex(th_text), 0);
+    lv_obj_center(fpl);
+
+    face_name_lbl = lv_label_create(scr);
+    lv_label_set_text(face_name_lbl, g_face.name);
+    lv_obj_add_style(face_name_lbl, &style_value, 0);
+    lv_obj_set_pos(face_name_lbl, 274, 131);
+
+    lv_obj_t *fn = lv_btn_create(scr);
+    lv_obj_set_size(fn, 26, 22);
+    lv_obj_set_pos(fn, 380, 128);
+    lv_obj_set_style_bg_color(fn, lv_color_hex(th_btn), 0);
+    lv_obj_set_style_radius(fn, 6, 0);
+    lv_obj_add_event_cb(fn, face_next_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *fnl = lv_label_create(fn);
+    lv_label_set_text(fnl, LV_SYMBOL_RIGHT);
+    lv_obj_set_style_text_font(fnl, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(fnl, lv_color_hex(th_text), 0);
+    lv_obj_center(fnl);
+
     /* ════════════════════ RIGHT COLUMN ════════════════════ */
 
     /* WiFi Setup button */
@@ -378,7 +574,7 @@ void screen_settings_create(void)
     lv_obj_set_style_text_color(bl, lv_color_hex(th_text), 0);
     lv_obj_center(bl);
 
-    lv_disp_load_scr(scr);
+    g_pending_scr = scr;
     ESP_LOGI(TAG, "Settings screen created");
 }
 
@@ -387,6 +583,7 @@ void screen_settings_destroy(void)
 {
     if (scr) {
         vol_pct_lbl = NULL;
+        face_name_lbl = NULL;
         lv_obj_del(scr);
         scr = NULL;
     }

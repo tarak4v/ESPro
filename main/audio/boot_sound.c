@@ -56,7 +56,7 @@ static const tone_note_t nokia_tune[] = {
 /* ══════════════════════════════════════════════════════════════
  *  Core melody player (blocking)
  * ══════════════════════════════════════════════════════════════ */
-void play_melody(const tone_note_t *notes, int count)
+void play_melody(const tone_note_t *notes, int count, uint8_t volume)
 {
     if (!notes || count <= 0) return;
     if (!io_expander_handle) {
@@ -114,7 +114,7 @@ void play_melody(const tone_note_t *notes, int count)
         .sample_rate = MELODY_SAMPLE_RATE, .mclk_multiple = 256,
     };
     esp_codec_dev_open(dev, &fs);
-    esp_codec_dev_write_reg(dev, 0x32, g_volume);  /* respect user volume */
+    esp_codec_dev_write_reg(dev, 0x32, volume);    /* caller-specified volume */
 
     /* 4. Generate & play each note */
     const int gap_ms = 20;  /* articulation gap between notes */
@@ -189,23 +189,25 @@ cleanup:
 typedef struct {
     const tone_note_t *notes;
     int count;
+    uint8_t volume;
 } melody_arg_t;
 
 static void melody_task(void *arg)
 {
     melody_arg_t *m = (melody_arg_t *)arg;
-    play_melody(m->notes, m->count);
+    play_melody(m->notes, m->count, m->volume);
     heap_caps_free(m);
     vTaskDelete(NULL);
 }
 
-void play_melody_async(const tone_note_t *notes, int count)
+void play_melody_async(const tone_note_t *notes, int count, uint8_t volume)
 {
     if (!notes || count <= 0) return;
     melody_arg_t *m = heap_caps_malloc(sizeof(melody_arg_t), MALLOC_CAP_DEFAULT);
     if (!m) return;
     m->notes = notes;
     m->count = count;
+    m->volume = volume;
     xTaskCreatePinnedToCore(melody_task, "melody", 4096, m, 2, NULL, 1);
 }
 
@@ -214,5 +216,5 @@ void play_melody_async(const tone_note_t *notes, int count)
  * ══════════════════════════════════════════════════════════════ */
 void boot_sound_play(void)
 {
-    play_melody(nokia_tune, NOKIA_TUNE_LEN);
+    play_melody(nokia_tune, NOKIA_TUNE_LEN, g_volume);
 }

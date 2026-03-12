@@ -19,11 +19,12 @@ typedef struct {
  */
 void boot_sound_play(void);
 
-/** Play an arbitrary melody (blocking). Skips if music player is active. */
-void play_melody(const tone_note_t *notes, int count);
+/** Play an arbitrary melody (blocking). Skips if music player is active.
+ *  volume: ES8311 DAC volume 0-255 (use g_volume for user setting). */
+void play_melody(const tone_note_t *notes, int count, uint8_t volume);
 
 /** Non-blocking version — spawns a FreeRTOS task. */
-void play_melody_async(const tone_note_t *notes, int count);
+void play_melody_async(const tone_note_t *notes, int count, uint8_t volume);
 
 #ifdef __cplusplus
 }

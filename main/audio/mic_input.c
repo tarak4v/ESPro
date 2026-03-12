@@ -234,6 +234,21 @@ void mic_start(void)
 {
     if (s_running || !s_rx) return;
 
+    /* Restore shared I2S clock to mic sample rate and enable TX.
+     * TX owns the clock pins (MCLK/BCLK/WS) — it must be enabled for
+     * the I2S peripheral to generate clocks that the ES7210 ADC needs.
+     * TTS or music playback may have left TX at a different rate. */
+    if (s_shared_tx) {
+        i2s_channel_disable(s_shared_tx);   /* ensure READY state for reconfig */
+        i2s_std_clk_config_t clk = I2S_STD_CLK_DEFAULT_CONFIG(MIC_SAMPLE_RATE);
+        clk.mclk_multiple = I2S_MCLK_MULTIPLE_256;
+        i2s_channel_reconfig_std_clock(s_shared_tx, &clk);
+        i2s_std_slot_config_t slot = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(
+            I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO);
+        i2s_channel_reconfig_std_slot(s_shared_tx, &slot);
+        i2s_channel_enable(s_shared_tx);    /* start clocks for RX */
+    }
+
     /* Open codec dev → configures ES7210 + enables RX channel */
     if (s_mic_dev) {
         esp_codec_dev_sample_info_t fs = {
@@ -271,6 +286,11 @@ void mic_stop(void)
     /* Close codec dev → puts ES7210 in standby + disables RX */
     if (s_mic_dev) {
         esp_codec_dev_close(s_mic_dev);
+    }
+
+    /* Disable TX (clock source) — consumers will re-enable as needed */
+    if (s_shared_tx) {
+        i2s_channel_disable(s_shared_tx);
     }
     s_level = 0;
 

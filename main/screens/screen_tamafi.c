@@ -87,16 +87,27 @@ typedef enum {
 #define DECAY_MS          900000     /* 15 min */
 
 /* Ambient sound thresholds */
-#define SPIKE_DELTA       40         /* jump above avg to trigger surprised */
-#define SPIKE_MIN_LEVEL   50         /* minimum absolute level for spike   */
+#define SPIKE_DELTA       60         /* jump above avg to trigger surprised */
+#define SPIKE_MIN_LEVEL   70         /* minimum absolute level for spike   */
 #define SILENCE_LEVEL     10         /* below this = silence               */
 #define SILENCE_MS        60000      /* 60 s quiet → sleepy                */
-#define LOUD_LEVEL        80         /* sustained loud → scared            */
-#define LOUD_MS           2000       /* how long loud must last            */
+#define LOUD_LEVEL        100        /* sustained loud → scared            */
+#define LOUD_MS           3000       /* how long loud must last            */
 #define TALK_LO           25         /* talking range low                  */
 #define TALK_HI           65         /* talking range high                 */
 #define TALK_MS           5000       /* sustained talking threshold        */
 #define LEVEL_HIST_SZ     10         /* rolling history buffer size        */
+#define DB_VOL            ((uint8_t)(g_volume * 70 / 100))  /* DeskBuddy at 40% */
+
+/* ── Mini-game: Catch the Fly ───────────────────────────── */
+#define FG_DURATION       20000   /* 20 s round            */
+#define FG_ESCAPE_MS      2500    /* fly escapes in 2.5 s  */
+#define FG_SPAWN_DELAY    400     /* ms between catches    */
+#define FG_FLY_SZ         24      /* visible fly dot size  */
+#define FG_AREA_X1        40      /* game area bounds      */
+#define FG_AREA_X2        400
+#define FG_AREA_Y1        34
+#define FG_AREA_Y2        152
 
 /* ════════════════════ Runtime state ══════════════════════ */
 static int      s_happy       = 0;   /* –100 … +100 */
@@ -143,6 +154,18 @@ static float    s_gyro_mag    = 0;        /* smoothed gyro magnitude     */
 static uint32_t s_shake_start = 0;
 static bool     s_shaking     = false;
 
+/* Mini-game state */
+typedef enum { FG_IDLE, FG_COUNTDOWN, FG_PLAY, FG_OVER } fg_st_t;
+static fg_st_t  s_fg_st       = FG_IDLE;
+static uint32_t s_fg_t0       = 0;     /* round start time       */
+static uint32_t s_fg_fly_t    = 0;     /* current fly spawn time */
+static uint32_t s_fg_cd_t     = 0;     /* countdown tick time    */
+static int      s_fg_cd_n     = 3;     /* countdown number       */
+static int      s_fg_score    = 0;
+static bool     s_fg_fly_vis  = false;
+static int      s_fg_fly_x    = 0;     /* fly centre coords      */
+static int      s_fg_fly_y    = 0;
+
 /* ════════════════════ LVGL handles ══════════════════════ */
 static lv_obj_t *scr        = NULL;
 static lv_obj_t *eye_l      = NULL;
@@ -150,6 +173,13 @@ static lv_obj_t *eye_r      = NULL;
 static lv_obj_t *state_lbl  = NULL;
 static lv_obj_t *happy_bar  = NULL;
 static lv_obj_t *happy_lbl  = NULL;
+
+/* Mini-game handles */
+static lv_obj_t *s_fg_fly_obj  = NULL;
+static lv_obj_t *s_fg_scr_lbl  = NULL;
+static lv_obj_t *s_fg_tmr_lbl  = NULL;
+static lv_obj_t *s_fg_msg_lbl  = NULL;
+static lv_obj_t *s_fg_play_btn = NULL;
 
 /* ════════════════════ Mood melodies ═════════════════════ */
 static const tone_note_t mel_loved[]    = {{523,80},{659,80},{784,80},{1047,200}};
@@ -159,6 +189,7 @@ static const tone_note_t mel_sad[]      = {{330,150},{262,150},{196,300}};
 static const tone_note_t mel_surprised[]= {{880,60},{1047,60},{1319,120}};  /* gasp */
 static const tone_note_t mel_yawn[]     = {{392,200},{330,200},{262,300}};  /* sleepy yawn */
 static const tone_note_t mel_dizzy[]    = {{523,60},{392,60},{523,60},{392,60},{262,200}};
+static const tone_note_t mel_catch[]    = {{1047,30},{1319,50}};   /* quick catch ping */
 
 /* ════════════════════ Helpers ═══════════════════════════ */
 static uint32_t now_ms(void)
@@ -193,8 +224,8 @@ static void set_happy(int v)
     s_last_change = now_ms();
     db_state_t new_st = current_state();
     if (old_st != new_st && !s_has_ovr) {
-        if (new_st == DB_HAPPY) play_melody_async(mel_happy, 3);
-        else if (new_st == DB_SAD) play_melody_async(mel_sad, 3);
+        if (new_st == DB_HAPPY) play_melody_async(mel_happy, 3, DB_VOL);
+        else if (new_st == DB_SAD) play_melody_async(mel_sad, 3, DB_VOL);
     }
 }
 
@@ -262,22 +293,24 @@ static void read_imu_data(float *ax_g, float *ay_g, float *gyro_mag_dps)
 static void face_tap_cb(lv_event_t *e)
 {
     (void)e;
+    if (s_fg_st != FG_IDLE) return;
     s_ovr = DB_LOVED;
     s_ovr_end = now_ms() + LOVED_MS;
     s_has_ovr = true;
     set_happy(s_happy + 10);
-    play_melody_async(mel_loved, 4);
+    play_melody_async(mel_loved, 4, DB_VOL);
     save_nvs();
 }
 
 static void face_hold_cb(lv_event_t *e)
 {
     (void)e;
+    if (s_fg_st != FG_IDLE) return;
     s_ovr = DB_SCARED;
     s_ovr_end = now_ms() + SCARED_MS;
     s_has_ovr = true;
     set_happy(s_happy - 10);
-    play_melody_async(mel_scared, 3);
+    play_melody_async(mel_scared, 3, DB_VOL);
     save_nvs();
 }
 
@@ -288,11 +321,71 @@ static void back_cb(lv_event_t *e)
     app_manager_set_mode(MODE_MENU);
 }
 
+/* ═══════ Mini-game: Catch the Fly ══════════════════════ */
+
+static void fg_show_ui(bool show)
+{
+    if (!s_fg_scr_lbl) return;
+    if (show) {
+        lv_obj_clear_flag(s_fg_scr_lbl, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(s_fg_tmr_lbl, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_fg_scr_lbl, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_fg_tmr_lbl, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_fg_fly_obj, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_fg_msg_lbl, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void fg_spawn_fly(void)
+{
+    s_fg_fly_x = FG_AREA_X1 + (int)(esp_random() % (FG_AREA_X2 - FG_AREA_X1));
+    s_fg_fly_y = FG_AREA_Y1 + (int)(esp_random() % (FG_AREA_Y2 - FG_AREA_Y1));
+    lv_obj_set_pos(s_fg_fly_obj, s_fg_fly_x - FG_FLY_SZ / 2,
+                                  s_fg_fly_y - FG_FLY_SZ / 2);
+    lv_obj_clear_flag(s_fg_fly_obj, LV_OBJ_FLAG_HIDDEN);
+    s_fg_fly_vis = true;
+    s_fg_fly_t   = now_ms();
+}
+
+static void fg_fly_tap_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_fg_st != FG_PLAY || !s_fg_fly_vis) return;
+    s_fg_score++;
+    s_fg_fly_vis = false;
+    lv_obj_add_flag(s_fg_fly_obj, LV_OBJ_FLAG_HIDDEN);
+    s_fg_fly_t = now_ms();
+    lv_label_set_text_fmt(s_fg_scr_lbl, "Caught: %d", s_fg_score);
+    set_happy(s_happy + 1);
+    s_ovr = DB_LOVED;
+    s_ovr_end = now_ms() + 350;
+    s_has_ovr = true;
+    play_melody_async(mel_catch, 2, DB_VOL);
+}
+
+static void fg_start_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_fg_st != FG_IDLE) return;
+    s_fg_st      = FG_COUNTDOWN;
+    s_fg_score   = 0;
+    s_fg_cd_n    = 3;
+    s_fg_cd_t    = now_ms();
+    s_fg_fly_vis = false;
+    lv_label_set_text(s_fg_scr_lbl, "Caught: 0");
+    lv_label_set_text(s_fg_tmr_lbl, "20s");
+    lv_label_set_text(s_fg_msg_lbl, "3");
+    fg_show_ui(true);
+    lv_obj_clear_flag(s_fg_msg_lbl, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_fg_play_btn, LV_OBJ_FLAG_HIDDEN);
+}
+
 /* ════════════════════ Create ════════════════════════════ */
 void screen_tamafi_create(void)
 {
     scr = lv_obj_create(NULL);
-    lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
+    lv_obj_set_style_bg_color(scr, lv_color_hex(th_bg), 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
     lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
@@ -362,6 +455,19 @@ void screen_tamafi_create(void)
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 84);
 
+    /* Play mini-game button */
+    s_fg_play_btn = lv_btn_create(info);
+    lv_obj_set_size(s_fg_play_btn, 90, 26);
+    lv_obj_align(s_fg_play_btn, LV_ALIGN_BOTTOM_MID, 0, -2);
+    lv_obj_set_style_bg_color(s_fg_play_btn, lv_color_hex(0x00AA44), 0);
+    lv_obj_set_style_radius(s_fg_play_btn, 8, 0);
+    lv_obj_add_event_cb(s_fg_play_btn, fg_start_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *pl = lv_label_create(s_fg_play_btn);
+    lv_label_set_text(pl, LV_SYMBOL_PLAY " Catch!");
+    lv_obj_set_style_text_font(pl, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(pl, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_center(pl);
+
     /* ── Face touch zone (left 440 px) ──── */
     lv_obj_t *touch = lv_obj_create(scr);
     lv_obj_remove_style_all(touch);
@@ -376,15 +482,54 @@ void screen_tamafi_create(void)
     lv_obj_t *back = lv_btn_create(scr);
     lv_obj_set_size(back, 56, 26);
     lv_obj_align(back, LV_ALIGN_TOP_LEFT, 6, 4);
-    lv_obj_set_style_bg_color(back, lv_color_hex(0x333333), 0);
+    lv_obj_set_style_bg_color(back, lv_color_hex(th_btn), 0);
     lv_obj_set_style_bg_opa(back, LV_OPA_70, 0);
     lv_obj_set_style_radius(back, 8, 0);
     lv_obj_add_event_cb(back, back_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *bl = lv_label_create(back);
     lv_label_set_text(bl, LV_SYMBOL_LEFT " Back");
     lv_obj_set_style_text_font(bl, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(bl, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_color(bl, lv_color_hex(th_text), 0);
     lv_obj_center(bl);
+
+    /* ── Mini-game objects (created hidden) ──── */
+    s_fg_fly_obj = lv_obj_create(scr);
+    lv_obj_remove_style_all(s_fg_fly_obj);
+    lv_obj_set_size(s_fg_fly_obj, FG_FLY_SZ, FG_FLY_SZ);
+    lv_obj_set_style_bg_color(s_fg_fly_obj, lv_color_hex(0x44FF44), 0);
+    lv_obj_set_style_bg_opa(s_fg_fly_obj, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(s_fg_fly_obj, FG_FLY_SZ / 2, 0);
+    lv_obj_set_style_shadow_width(s_fg_fly_obj, 12, 0);
+    lv_obj_set_style_shadow_color(s_fg_fly_obj, lv_color_hex(0x44FF44), 0);
+    lv_obj_set_style_shadow_opa(s_fg_fly_obj, LV_OPA_60, 0);
+    lv_obj_add_flag(s_fg_fly_obj, LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_ext_click_area(s_fg_fly_obj, 10);
+    lv_obj_add_event_cb(s_fg_fly_obj, fg_fly_tap_cb, LV_EVENT_SHORT_CLICKED, NULL);
+
+    s_fg_scr_lbl = lv_label_create(scr);
+    lv_label_set_text(s_fg_scr_lbl, "");
+    lv_obj_set_style_text_font(s_fg_scr_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_fg_scr_lbl, lv_color_hex(0x44FF44), 0);
+    lv_obj_set_pos(s_fg_scr_lbl, 70, 6);
+    lv_obj_add_flag(s_fg_scr_lbl, LV_OBJ_FLAG_HIDDEN);
+
+    s_fg_tmr_lbl = lv_label_create(scr);
+    lv_label_set_text(s_fg_tmr_lbl, "");
+    lv_obj_set_style_text_font(s_fg_tmr_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_fg_tmr_lbl, lv_color_hex(0xFFFF44), 0);
+    lv_obj_set_pos(s_fg_tmr_lbl, 360, 6);
+    lv_obj_add_flag(s_fg_tmr_lbl, LV_OBJ_FLAG_HIDDEN);
+
+    s_fg_msg_lbl = lv_label_create(scr);
+    lv_label_set_text(s_fg_msg_lbl, "");
+    lv_obj_set_width(s_fg_msg_lbl, 440);
+    lv_obj_set_style_text_font(s_fg_msg_lbl, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(s_fg_msg_lbl, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_align(s_fg_msg_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_pos(s_fg_msg_lbl, 0, 60);
+    lv_obj_add_flag(s_fg_msg_lbl, LV_OBJ_FLAG_HIDDEN);
+
+    s_fg_st = FG_IDLE;
 
     /* ── Init animation timers ──── */
     uint32_t t = now_ms();
@@ -420,7 +565,7 @@ void screen_tamafi_create(void)
     s_last_sleepy_pen = 0;
     s_last_spike      = 0;
 
-    lv_disp_load_scr(scr);
+    g_pending_scr = scr;
     screen_tamafi_update();
     ESP_LOGI(TAG, "DeskBuddy created (happiness=%d)", s_happy);
 }
@@ -433,11 +578,17 @@ void screen_tamafi_destroy(void)
         save_nvs();
         lv_obj_del(scr);
         scr       = NULL;
-        eye_l     = NULL;
-        eye_r     = NULL;
-        state_lbl = NULL;
-        happy_bar = NULL;
-        happy_lbl = NULL;
+        eye_l          = NULL;
+        eye_r          = NULL;
+        state_lbl      = NULL;
+        happy_bar      = NULL;
+        happy_lbl      = NULL;
+        s_fg_fly_obj   = NULL;
+        s_fg_scr_lbl   = NULL;
+        s_fg_tmr_lbl   = NULL;
+        s_fg_msg_lbl   = NULL;
+        s_fg_play_btn  = NULL;
+        s_fg_st        = FG_IDLE;
     }
 }
 
@@ -467,15 +618,20 @@ void screen_tamafi_update(void)
         s_next_blink = t + BLINK_MS + 2000 + (esp_random() % 4000);
     }
 
-    /* ── Horizontal drift ──── */
-    if (t >= s_next_move) {
-        s_eye_x_tgt = (float)((int)(esp_random() % 61) - 30);
-        s_next_move = t + 2000 + (esp_random() % 3000);
+    /* ── Horizontal drift (skip target during game) ──── */
+    if (s_fg_st == FG_IDLE) {
+        if (t >= s_next_move) {
+            s_eye_x_tgt = (float)((int)(esp_random() % 61) - 30);
+            s_next_move = t + 2000 + (esp_random() % 3000);
+        }
     }
     s_eye_x += (s_eye_x_tgt - s_eye_x) * 0.15f;
 
-    /* ── Vertical drift (for gestures) ──── */
-    s_eye_y += (s_eye_y_tgt - s_eye_y) * 0.12f;
+    /* ── Vertical drift (faster during game for fly tracking) ──── */
+    if (s_fg_st == FG_IDLE)
+        s_eye_y += (s_eye_y_tgt - s_eye_y) * 0.12f;
+    else
+        s_eye_y += (s_eye_y_tgt - s_eye_y) * 0.25f;
 
     /* ── IMU tilt tracking + shake detection ──── */
     {
@@ -495,20 +651,22 @@ void screen_tamafi_update(void)
         /* Smooth gyro magnitude */
         s_gyro_mag = s_gyro_mag * 0.7f + gyro_mag * 0.3f;
 
-        /* Shake → Dizzy */
-        if (s_gyro_mag > 150.0f) {
-            if (!s_shaking) { s_shake_start = t; s_shaking = true; }
-            if ((t - s_shake_start > 300) && !s_has_ovr) {
-                s_ovr     = DB_DIZZY;
-                s_ovr_end = t + DIZZY_MS;
-                s_has_ovr = true;
+        /* Shake → Dizzy (skip during mini-game) */
+        if (s_fg_st == FG_IDLE) {
+            if (s_gyro_mag > 150.0f) {
+                if (!s_shaking) { s_shake_start = t; s_shaking = true; }
+                if ((t - s_shake_start > 300) && !s_has_ovr) {
+                    s_ovr     = DB_DIZZY;
+                    s_ovr_end = t + DIZZY_MS;
+                    s_has_ovr = true;
+                    s_shaking = false;
+                    s_roll_phase = 0;
+                    set_happy(s_happy - 3);
+                    play_melody_async(mel_dizzy, 5, DB_VOL);
+                }
+            } else {
                 s_shaking = false;
-                s_roll_phase = 0;
-                set_happy(s_happy - 3);
-                play_melody_async(mel_dizzy, 5);
             }
-        } else {
-            s_shaking = false;
         }
     }
 
@@ -632,8 +790,82 @@ void screen_tamafi_update(void)
     if (happy_lbl)
         lv_label_set_text_fmt(happy_lbl, "%d%%", s_happy);
 
-    /* ── Ambient sound → eye gestures ──── */
-    if (mic_is_active()) {
+    /* ── Mini-game: Catch the Fly update ──── */
+    if (s_fg_st != FG_IDLE) {
+        switch (s_fg_st) {
+        case FG_COUNTDOWN: {
+            uint32_t el = t - s_fg_cd_t;
+            int n = 3 - (int)(el / 1000);
+            if (n != s_fg_cd_n && n >= 0) {
+                s_fg_cd_n = n;
+                if (n > 0) lv_label_set_text_fmt(s_fg_msg_lbl, "%d", n);
+                else       lv_label_set_text(s_fg_msg_lbl, "GO!");
+            }
+            if (el >= 4000) {
+                s_fg_st    = FG_PLAY;
+                s_fg_t0    = t;
+                s_fg_fly_t = t;
+                lv_obj_add_flag(s_fg_msg_lbl, LV_OBJ_FLAG_HIDDEN);
+                fg_spawn_fly();
+            }
+            break;
+        }
+        case FG_PLAY: {
+            uint32_t elapsed = t - s_fg_t0;
+            int rem = ((int)FG_DURATION - (int)elapsed + 999) / 1000;
+            if (rem < 0) rem = 0;
+            lv_label_set_text_fmt(s_fg_tmr_lbl, "%ds", rem);
+
+            if (elapsed >= FG_DURATION) {
+                s_fg_st  = FG_OVER;
+                s_fg_cd_t = t;
+                lv_obj_add_flag(s_fg_fly_obj, LV_OBJ_FLAG_HIDDEN);
+                s_fg_fly_vis = false;
+                int bonus = s_fg_score >= 8 ? 10 : s_fg_score >= 5 ? 5 : 0;
+                set_happy(s_happy + bonus);
+                lv_label_set_text_fmt(s_fg_msg_lbl, "%d caught!  +%d",
+                                      s_fg_score, s_fg_score + bonus);
+                lv_obj_clear_flag(s_fg_msg_lbl, LV_OBJ_FLAG_HIDDEN);
+                s_ovr = (s_fg_score >= 5) ? DB_HAPPY : DB_SAD;
+                s_ovr_end = t + 3000;
+                s_has_ovr = true;
+                play_melody_async(s_fg_score >= 5 ? mel_happy : mel_sad, 3, DB_VOL);
+                save_nvs();
+            } else if (s_fg_fly_vis) {
+                if (t - s_fg_fly_t >= FG_ESCAPE_MS) {
+                    s_fg_fly_vis = false;
+                    lv_obj_add_flag(s_fg_fly_obj, LV_OBJ_FLAG_HIDDEN);
+                    s_fg_fly_t = t;
+                    s_ovr = DB_CURIOUS; s_ovr_end = t + 400; s_has_ovr = true;
+                } else {
+                    int jx = (int)(esp_random() % 5) - 2;
+                    int jy = (int)(esp_random() % 5) - 2;
+                    lv_obj_set_pos(s_fg_fly_obj,
+                                   s_fg_fly_x - FG_FLY_SZ / 2 + jx,
+                                   s_fg_fly_y - FG_FLY_SZ / 2 + jy);
+                    s_eye_x_tgt = (float)(s_fg_fly_x - FACE_CX) * 0.6f;
+                    s_eye_y_tgt = (float)(s_fg_fly_y - FACE_CY) * 0.4f;
+                }
+            } else {
+                if (t - s_fg_fly_t >= FG_SPAWN_DELAY) {
+                    fg_spawn_fly();
+                }
+            }
+            break;
+        }
+        case FG_OVER:
+            if (t - s_fg_cd_t >= 3000) {
+                s_fg_st = FG_IDLE;
+                fg_show_ui(false);
+                lv_obj_clear_flag(s_fg_play_btn, LV_OBJ_FLAG_HIDDEN);
+            }
+            break;
+        default: break;
+        }
+    }
+
+    /* ── Ambient sound → eye gestures (skip during game) ──── */
+    if (s_fg_st == FG_IDLE && mic_is_active()) {
         uint8_t lvl = mic_get_level();
 
         /* Update rolling history */
@@ -643,7 +875,7 @@ void screen_tamafi_update(void)
 
         /* --- Spike detection → Surprised (wide eyes) --- */
         if (lvl >= SPIKE_MIN_LEVEL && (lvl - avg) >= SPIKE_DELTA
-            && !s_has_ovr && (t - s_last_spike > 3000)) {
+            && !s_has_ovr && (t - s_last_spike > 5000)) {
             s_ovr     = DB_SURPRISED;
             s_ovr_end = t + SURPRISED_MS;
             s_has_ovr = true;
@@ -651,7 +883,7 @@ void screen_tamafi_update(void)
             s_last_gesture = t;
             s_roll_phase = 0;
             set_happy(s_happy + 3);
-            play_melody_async(mel_surprised, 3);
+            play_melody_async(mel_surprised, 3, DB_VOL);
         }
         /* --- Very loud sustained → Scared (tiny jittering eyes) --- */
         else if (lvl > LOUD_LEVEL) {
@@ -662,7 +894,7 @@ void screen_tamafi_update(void)
                 s_has_ovr = true;
                 s_last_gesture = t;
                 set_happy(s_happy - 5);
-                play_melody_async(mel_scared, 3);
+                play_melody_async(mel_scared, 3, DB_VOL);
                 s_is_loud = false;
             }
         }
@@ -719,7 +951,7 @@ void screen_tamafi_update(void)
                 }
                 /* Play yawn once when entering sleepy */
                 if (t - s_silence_start < SILENCE_MS + 200) {
-                    play_melody_async(mel_yawn, 3);
+                    play_melody_async(mel_yawn, 3, DB_VOL);
                 }
             }
         }

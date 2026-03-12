@@ -118,9 +118,9 @@ static volatile bool s_new_song          = false;
 /* ================================================================
  *  Audio pipeline handles
  * ================================================================ */
-#define STREAM_BUF_SIZE     (64 * 1024)
+#define STREAM_BUF_SIZE     (256 * 1024)   /* PSRAM ring buffer */
 #define DEC_INPUT_BUF_SIZE  (8 * 1024)
-#define PREBUFFER_BYTES     (16 * 1024)
+#define PREBUFFER_BYTES     (48 * 1024)    /* fill before playback starts */
 #define PCM_OUT_BUF_SIZE    (8 * 1024)
 
 /* Backward compat — stream buffer still called s_mp3_buf internally */
@@ -333,7 +333,7 @@ static int fetch_jiosaavn_songs(int genre)
     esp_http_client_config_t cfg = {
         .url               = url,
         .timeout_ms        = 15000,
-        .buffer_size       = 4096,
+        .buffer_size       = 16384,
         .buffer_size_tx    = 2048,
         .crt_bundle_attach = esp_crt_bundle_attach,
     };
@@ -471,7 +471,7 @@ static void stream_radio(const char *url)
     esp_http_client_config_t cfg = {
         .url            = url,
         .timeout_ms     = 15000,
-        .buffer_size    = 4096,
+        .buffer_size    = 16384,
         .crt_bundle_attach = esp_crt_bundle_attach,
         .max_redirection_count = 5,
     };

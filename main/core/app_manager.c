@@ -22,6 +22,12 @@
 static const char *TAG = "app_mgr";
 
 static app_mode_t current_mode = MODE_CLOCK;
+lv_obj_t *g_pending_scr = NULL;
+
+/* ── Transition animation state ───────────────────────────── */
+#define ANIM_DURATION_MS  300
+static bool        s_animating     = false;
+static app_mode_t  s_destroy_mode  = MODE_COUNT;
 
 /* BOOT button state for edge detection */
 #define BOOT_BUTTON_GPIO  GPIO_NUM_0
@@ -43,35 +49,60 @@ static const screen_ops_t screen_table[MODE_COUNT] = {
     [MODE_WIFI_CFG] = { screen_wifi_cfg_create, screen_wifi_cfg_destroy },
 };
 
-/* ── Transition ───────────────────────────────────────────── */
-static void load_screen(app_mode_t new_mode)
+/* ── Deferred old-screen destroy after animation ─────────── */
+static void anim_done_timer_cb(lv_timer_t *timer)
 {
+    if (s_destroy_mode < MODE_COUNT) {
+        screen_table[s_destroy_mode].destroy();
+        s_destroy_mode = MODE_COUNT;
+    }
+    s_animating = false;
+    lv_timer_del(timer);
+}
+
+/* ── Transition ───────────────────────────────────────────── */
+static void load_screen(app_mode_t new_mode, lv_scr_load_anim_t anim)
+{
+    if (s_animating) return;
+
     app_mode_t old_mode = current_mode;
     current_mode = new_mode;
-    /* Create new screen FIRST so lv_disp_load_scr can
-     * reference the still-valid old screen for transition. */
+
+    /* Create new screen (sets g_pending_scr instead of loading). */
     screen_table[current_mode].create();
-    /* Now safe to delete the old screen objects */
-    screen_table[old_mode].destroy();
+
+    if (g_pending_scr) {
+        s_animating    = true;
+        s_destroy_mode = old_mode;
+        lv_scr_load_anim(g_pending_scr, anim, ANIM_DURATION_MS, 0, false);
+        lv_timer_create(anim_done_timer_cb, ANIM_DURATION_MS + 50, NULL);
+        g_pending_scr = NULL;
+    } else {
+        /* Fallback: no pending screen — destroy old immediately */
+        screen_table[old_mode].destroy();
+    }
     ESP_LOGI(TAG, "Switched to mode %d", current_mode);
 }
 
 static void navigate_next(void)
 {
+    if (s_animating) return;
     if (current_mode >= MODE_SWIPE_COUNT) {
-        load_screen(MODE_MENU);          /* from Pet → back to menu */
+        load_screen(MODE_MENU, LV_SCR_LOAD_ANIM_MOVE_RIGHT);
         return;
     }
-    load_screen((current_mode + 1) % MODE_SWIPE_COUNT);
+    load_screen((current_mode + 1) % MODE_SWIPE_COUNT, LV_SCR_LOAD_ANIM_MOVE_LEFT);
 }
 
 static void navigate_prev(void)
 {
+    if (s_animating) return;
     if (current_mode >= MODE_SWIPE_COUNT) {
-        load_screen(MODE_MENU);
+        load_screen(MODE_MENU, LV_SCR_LOAD_ANIM_MOVE_RIGHT);
         return;
     }
-    load_screen(current_mode == 0 ? MODE_SWIPE_COUNT - 1 : current_mode - 1);
+    load_screen(current_mode == 0 ? MODE_SWIPE_COUNT - 1 : current_mode - 1,
+                LV_SCR_LOAD_ANIM_MOVE_RIGHT);
 }
 
 /* ── Public API ───────────────────────────────────────────── */
@@ -92,8 +123,12 @@ void app_manager_init(lv_indev_t *touch_indev)
     boot_btn_prev      = gpio_get_level(BOOT_BUTTON_GPIO);
     boot_btn_last_time = esp_timer_get_time();
 
-    /* Create the initial clock screen */
+    /* Create the initial clock screen (no animation on boot) */
     screen_table[MODE_CLOCK].create();
+    if (g_pending_scr) {
+        lv_disp_load_scr(g_pending_scr);
+        g_pending_scr = NULL;
+    }
 
     ESP_LOGI(TAG, "App manager initialised — starting with CLOCK");
 }
@@ -129,8 +164,10 @@ void app_manager_update(void)
 
 void app_manager_set_mode(app_mode_t mode)
 {
-    if (mode >= MODE_COUNT || mode == current_mode) return;
-    load_screen(mode);
+    if (mode >= MODE_COUNT || mode == current_mode || s_animating) return;
+    lv_scr_load_anim_t anim = (mode < current_mode)
+        ? LV_SCR_LOAD_ANIM_MOVE_RIGHT : LV_SCR_LOAD_ANIM_MOVE_LEFT;
+    load_screen(mode, anim);
 }
 
 app_mode_t app_manager_get_mode(void)
