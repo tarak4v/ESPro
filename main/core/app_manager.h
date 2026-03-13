@@ -15,6 +15,7 @@ extern "C" {
 typedef enum {
     MODE_CLOCK = 0,
     MODE_MENU,
+    MODE_MORE,
     MODE_SWIPE_COUNT,          /* number of modes in swipe cycle */
     MODE_SETTINGS = MODE_SWIPE_COUNT,
     MODE_TAMAFI,

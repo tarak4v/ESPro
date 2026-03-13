@@ -31,7 +31,7 @@ static lv_obj_t *time_label     = NULL;
 static lv_obj_t *ampm_label     = NULL;
 static lv_obj_t *date_label     = NULL;
 static lv_obj_t *weekday_label  = NULL;
-static lv_obj_t *mode_dot[2];
+static lv_obj_t *mode_dot[3];
 static lv_obj_t *wifi_icon      = NULL;
 static lv_obj_t *bt_icon        = NULL;
 static lv_obj_t *weather_temp   = NULL;
@@ -357,10 +357,10 @@ void screen_clock_create(void)
     lv_obj_set_style_text_color(weather_loc, lv_color_hex(c_wloc), 0);
     lv_obj_align(weather_loc, LV_ALIGN_CENTER, 0, 38);
 
-    /* ── Page indicator dots (2) ──── */
+    /* ── Page indicator dots (3) ──── */
     lv_obj_t *dot_row = lv_obj_create(scr);
     lv_obj_remove_style_all(dot_row);
-    lv_obj_set_size(dot_row, 40, 10);
+    lv_obj_set_size(dot_row, 50, 10);
     lv_obj_align(dot_row, LV_ALIGN_BOTTOM_MID, 0, -2);
     lv_obj_set_flex_flow(dot_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(dot_row, LV_FLEX_ALIGN_CENTER,
@@ -368,7 +368,7 @@ void screen_clock_create(void)
     lv_obj_set_style_pad_column(dot_row, 8, 0);
     lv_obj_clear_flag(dot_row, LV_OBJ_FLAG_SCROLLABLE);
 
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < 3; i++) {
         mode_dot[i] = lv_obj_create(dot_row);
         lv_obj_remove_style_all(mode_dot[i]);
         if (i == 0)
@@ -394,7 +394,7 @@ void screen_clock_destroy(void)
         ampm_label    = NULL;
         date_label    = NULL;
         weekday_label = NULL;
-        for (int i = 0; i < 2; i++) mode_dot[i] = NULL;
+        for (int i = 0; i < 3; i++) mode_dot[i] = NULL;
         for (int i = 0; i < 4; i++) flip_digit[i] = NULL;
         flip_colon    = NULL;
         memset(flip_prev, '?', sizeof(flip_prev));

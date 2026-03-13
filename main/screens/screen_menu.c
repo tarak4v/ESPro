@@ -29,6 +29,7 @@
 #include <stdio.h>
 #include "game_maze.h"
 #include "game_race.h"
+#include "game_dino.h"
 #include "music_player.h"
 #include "macropad.h"
 #include "screen_assistant.h"
@@ -89,8 +90,6 @@ static const menu_entry_t apps[] = {
     { "Game",     LV_SYMBOL_PLAY,      0x880E4F },
     { "Music",    LV_SYMBOL_AUDIO,     0x7B6800 },
     { "Buddy",    LV_SYMBOL_EYE_OPEN,  0x006064 },
-    { "Macropad", LV_SYMBOL_KEYBOARD,  0x37474F },
-    { "Settings", LV_SYMBOL_SETTINGS,  0x546E7A },
 };
 #define APP_COUNT (sizeof(apps) / sizeof(apps[0]))
 
@@ -873,6 +872,13 @@ static void game_pick_race_cb(lv_event_t *e)
     game_race_open(scr);
 }
 
+static void game_pick_dino_cb(lv_event_t *e)
+{
+    (void)e;
+    close_overlay();
+    game_dino_open(scr);
+}
+
 static void open_game_picker(void)
 {
     if (overlay) close_overlay();
@@ -904,17 +910,18 @@ static void open_game_picker(void)
     lv_obj_set_style_text_color(title, lv_color_hex(0xFFFFFF), 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 6);
 
-    /* Two game cards side by side */
+    /* Three game cards side by side */
     static const struct { const char *name; const char *icon; uint32_t col; } games[] = {
-        { "Tilt Maze",  LV_SYMBOL_SHUFFLE,  0x880E4F },
-        { "Traffic Rider", LV_SYMBOL_RIGHT,  0x1565C0 },
+        { "Tilt Maze",     LV_SYMBOL_SHUFFLE,  0x880E4F },
+        { "Traffic Rider", LV_SYMBOL_RIGHT,    0x1565C0 },
+        { "Dino Run",      LV_SYMBOL_NEXT,     0x33691E },
     };
-    lv_event_cb_t cbs[] = { game_pick_maze_cb, game_pick_race_cb };
+    lv_event_cb_t cbs[] = { game_pick_maze_cb, game_pick_race_cb, game_pick_dino_cb };
 
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < 3; i++) {
         lv_obj_t *card = lv_btn_create(overlay);
-        lv_obj_set_size(card, 180, 100);
-        lv_obj_set_pos(card, 130 + i * 210, 40);
+        lv_obj_set_size(card, 150, 100);
+        lv_obj_set_pos(card, 60 + i * 180, 40);
         lv_obj_set_style_bg_color(card, lv_color_hex(games[i].col), 0);
         lv_obj_set_style_radius(card, 14, 0);
         lv_obj_add_event_cb(card, cbs[i], LV_EVENT_CLICKED, NULL);
@@ -947,11 +954,9 @@ static void card_click_cb(lv_event_t *e)
     switch (idx) {
         case 0: open_led_overlay();     break;
         case 1: screen_assistant_open(scr); break;
-        case 2: game_race_open(scr);    break;  /* Traffic Rider directly */
+        case 2: open_game_picker();     break;
         case 3: music_player_open(scr); break;
         case 4: app_manager_set_mode(MODE_TAMAFI); break;
-        case 5: macropad_open(scr);     break;
-        case 6: app_manager_set_mode(MODE_SETTINGS); break;
         default: break;
     }
 }
@@ -959,7 +964,7 @@ static void card_click_cb(lv_event_t *e)
 /* ── Styles ───────────────────────────────────────────────── */
 static lv_style_t style_bg, style_card, style_icon, style_name;
 static lv_style_t style_dot_active, style_dot_inactive;
-static lv_obj_t *mode_dot[2];
+static lv_obj_t *mode_dot[3];
 
 static void init_styles(void)
 {
@@ -1035,13 +1040,14 @@ void screen_menu_update(void)
     if (game_race_is_active()) {
         game_race_update();
     }
+    if (game_dino_is_active()) {
+        game_dino_update();
+    }
 
     /* Music player tick */
     if (music_player_is_active()) {
         music_player_update();
     }
-
-    /* Macropad — nothing to tick, but close check */
 
     /* AI voice assistant tick */
     if (screen_assistant_is_active()) {
@@ -1068,12 +1074,10 @@ void screen_menu_create(void)
     lv_obj_set_size(row, 620, 110);
     lv_obj_align(row, LV_ALIGN_CENTER, 0, 2);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START,
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(row, 10, 0);
-    lv_obj_add_flag(row, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scroll_dir(row, LV_DIR_HOR);
-    lv_obj_set_scroll_snap_x(row, LV_SCROLL_SNAP_CENTER);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
 
     for (size_t i = 0; i < APP_COUNT; i++) {
         lv_obj_t *card = lv_obj_create(row);
@@ -1097,10 +1101,10 @@ void screen_menu_create(void)
                             (void *)(uintptr_t)i);
     }
 
-    /* Page dots (2) */
+    /* Page dots (3) — dot 1 active for Menu */
     lv_obj_t *dot_row = lv_obj_create(scr);
     lv_obj_remove_style_all(dot_row);
-    lv_obj_set_size(dot_row, 40, 12);
+    lv_obj_set_size(dot_row, 50, 12);
     lv_obj_align(dot_row, LV_ALIGN_BOTTOM_MID, 0, -4);
     lv_obj_set_flex_flow(dot_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(dot_row, LV_FLEX_ALIGN_CENTER,
@@ -1108,7 +1112,7 @@ void screen_menu_create(void)
     lv_obj_set_style_pad_column(dot_row, 8, 0);
     lv_obj_clear_flag(dot_row, LV_OBJ_FLAG_SCROLLABLE);
 
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < 3; i++) {
         mode_dot[i] = lv_obj_create(dot_row);
         lv_obj_remove_style_all(mode_dot[i]);
         if (i == 1)
@@ -1127,8 +1131,8 @@ void screen_menu_destroy(void)
     if (scr) {
         game_maze_close();
         game_race_close();
+        game_dino_close();
         music_player_close();
-        macropad_close();
         overlay = NULL; led_btn = NULL; led_btn_lbl = NULL; led_on = false;
         wifi_list = NULL; wifi_status_lbl = NULL;
         ble_list = NULL; ble_status_lbl = NULL;

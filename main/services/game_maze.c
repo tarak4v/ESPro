@@ -529,15 +529,12 @@ void game_maze_update(void)
 
     /*
      * Device orientation (landscape, USB on right):
-     *   Tilt right/left → accel X maps to ball horizontal (screen X)
-     *   Tilt toward/away → accel Y maps to ball vertical  (screen Y)
-     *
-     * After the 90° software rotation the mapping is:
-     *   screen-X ← accel-Y (inverted)
-     *   screen-Y ← accel-X
+     *   Same axis mapping as Traffic Rider:
+     *   screen-X ← accel-X (ax_g)
+     *   screen-Y ← accel-Y (ay_g) inverted
      */
-    float tilt_x = -ay_g * ACCEL_SCALE;
-    float tilt_y =  ax_g * ACCEL_SCALE;
+    float tilt_x = ax_g * ACCEL_SCALE;
+    float tilt_y = -ay_g * ACCEL_SCALE;
 
     /* ── Update velocity ──────────────────────────────────── */
     vx = (vx + tilt_x) * FRICTION;

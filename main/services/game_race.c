@@ -50,6 +50,8 @@ static const char *TAG = "race";
 #define OBS_START_SPD  3.5f             /* initial scroll speed */
 #define OBS_MAX_SPD    12.0f
 #define OBS_ACCEL      0.004f           /* speed ramp per tick */
+#define LEVEL_UP_US    (15 * 1000000LL)  /* speed boost every 15s */
+#define LEVEL_UP_BUMP  0.5f             /* speed increase per level */
 
 /* -- Road centre stripes ----------------------------------------------- */
 #define STRIPE_ROWS    6
@@ -92,6 +94,8 @@ static int           s_next_spawn;
 static int           s_score;
 static int           s_hiscore;
 static int64_t       s_last_tick_us;
+static int64_t       s_game_start_us;
+static int           s_level;
 
 /* Stripe scroll */
 static float         s_stripe_off;
@@ -365,6 +369,8 @@ static void reset_game(void)
     s_next_spawn = 8;
     s_stripe_off = 0.0f;
     s_last_tick_us = esp_timer_get_time();
+    s_game_start_us = s_last_tick_us;
+    s_level = 0;
 
     rng_seed((uint32_t)esp_timer_get_time());
 
@@ -556,6 +562,15 @@ void game_race_update(void)
 
     /* Increase speed + score */
     s_speed += OBS_ACCEL * dt;
+
+    /* Level-up speed boost every 90 seconds */
+    int cur_level = (int)((now_us - s_game_start_us) / LEVEL_UP_US);
+    if (cur_level > s_level) {
+        s_level = cur_level;
+        s_speed += LEVEL_UP_BUMP;
+        ESP_LOGI(TAG, "Level %d! Speed boost -> %.1f", s_level, s_speed);
+    }
+
     if (s_speed > OBS_MAX_SPD) s_speed = OBS_MAX_SPD;
     s_score++;
 

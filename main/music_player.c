@@ -96,9 +96,9 @@ static volatile int  s_genre_switch      = -1;
 /* ================================================================
  *  Audio pipeline handles
  * ================================================================ */
-#define MP3_BUF_SIZE        (64 * 1024)
+#define MP3_BUF_SIZE        (96 * 1024)
 #define MP3_INPUT_BUF_SIZE  (8 * 1024)
-#define PRE_BUFFER_BYTES    (16 * 1024)
+#define PRE_BUFFER_BYTES    (24 * 1024)
 #define API_BUF_SIZE        (48 * 1024)
 
 static StreamBufferHandle_t s_mp3_buf    = NULL;
@@ -179,14 +179,14 @@ static void audio_init(int sample_rate)
 
     esp_codec_dev_sample_info_t fs = {
         .bits_per_sample = 16,
-        .channel         = 1,
+        .channel         = 2,
         .sample_rate     = (uint32_t)sample_rate,
         .mclk_multiple   = 256,
     };
     esp_codec_dev_open(s_codec_dev, &fs);
-    esp_codec_dev_write_reg(s_codec_dev, 0x32, g_volume);
+    esp_codec_dev_set_out_vol(s_codec_dev, (float)g_volume * 127.5f / 255.0f - 95.5f);
 
-    ESP_LOGI(TAG, "Audio init: %d Hz mono", sample_rate);
+    ESP_LOGI(TAG, "Audio init: %d Hz stereo, vol=%d", sample_rate, g_volume);
 }
 
 static void audio_deinit(void)
@@ -207,7 +207,7 @@ static void audio_deinit(void)
 /* ================================================================
  *  JioSaavn DES-ECB URL decryption
  *  Key: "38346591", Base64 decode → DES-ECB decrypt → PKCS#5 unpad
- *  Then rewrite quality to _160.mp3 for minimp3 compatibility
+ *  Then rewrite quality to _320.mp3 for best clarity
  * ================================================================ */
 static int jiosaavn_decrypt_url(const char *enc, char *out, int out_sz)
 {
@@ -254,22 +254,23 @@ static int jiosaavn_decrypt_url(const char *enc, char *out, int out_sz)
         olen -= pad;
     plain[olen] = '\0';
 
-    /* Rewrite quality: replace _96.mp4 / _320.mp4 etc → _160.mp3
-     * This ensures we get MP3 format that minimp3 can decode */
+    /* Rewrite quality: replace _96.mp4 / _320.mp4 etc → _320.mp3
+     * 320 kbps MP3 for best clarity that minimp3 can decode */
     char *url_str = (char *)plain;
 
-    /* Find the last underscore before .mp4 */
-    char *dot_mp4 = strstr(url_str, ".mp4");
-    if (dot_mp4) {
+    /* Find the last underscore before .mp4 or .mp3 */
+    char *dot_ext = strstr(url_str, ".mp4");
+    if (!dot_ext) dot_ext = strstr(url_str, ".mp3");
+    if (dot_ext) {
         /* Walk backward to find the underscore before the bitrate */
-        char *us = dot_mp4 - 1;
+        char *us = dot_ext - 1;
         while (us > url_str && *us != '_') us--;
         if (*us == '_') {
-            /* Replace _XXX.mp4 with _160.mp3 */
+            /* Replace _XXX.mp4/.mp3 with _320.mp3 */
             int prefix_len = (int)(us - url_str);
-            if (prefix_len + 9 < out_sz) {   /* _160.mp3\0 = 9 */
+            if (prefix_len + 9 < out_sz) {   /* _320.mp3\0 = 9 */
                 memcpy(out, url_str, prefix_len);
-                memcpy(out + prefix_len, "_160.mp3", 8);
+                memcpy(out + prefix_len, "_320.mp3", 8);
                 out[prefix_len + 8] = '\0';
                 heap_caps_free(plain);
                 return 0;
@@ -422,7 +423,7 @@ static void stream_radio(const char *url)
     esp_http_client_config_t cfg = {
         .url            = url,
         .timeout_ms     = 15000,
-        .buffer_size    = 4096,
+        .buffer_size    = 8192,
         .buffer_size_tx = 2048,
         .crt_bundle_attach = esp_crt_bundle_attach,
         .max_redirection_count = 5,
@@ -589,7 +590,7 @@ static void decode_task(void *arg)
     pcm    = heap_caps_malloc(MINIMP3_MAX_SAMPLES_PER_FRAME *
                                        sizeof(int16_t), MALLOC_CAP_SPIRAM);
     mono   = heap_caps_malloc(MINIMP3_MAX_SAMPLES_PER_FRAME *
-                                       sizeof(int16_t), MALLOC_CAP_SPIRAM);
+                                       2 * sizeof(int16_t), MALLOC_CAP_SPIRAM);
     if (!mp3_in || !pcm || !mono) {
         ESP_LOGE(TAG, "Decode buf alloc failed");
         goto done;
@@ -629,25 +630,55 @@ static void decode_task(void *arg)
 
         if (samples > 0) {
             if (!hw_ok) {
-                ESP_LOGI(TAG, "First MP3 frame: %dHz %dch, calling audio_init",
-                         info.hz, info.channels);
+                ESP_LOGI(TAG, "First MP3 frame: %dHz %dch %dkbps, calling audio_init",
+                         info.hz, info.channels, info.bitrate_kbps);
                 audio_init(info.hz > 0 ? info.hz : 44100);
                 hw_ok = true;
-                ESP_LOGI(TAG, "Audio: %dHz %dch", info.hz, info.channels);
+                ESP_LOGI(TAG, "Audio: %dHz %dch %dkbps", info.hz, info.channels,
+                         info.bitrate_kbps);
             }
             total_decoded++;
 
-            int16_t *out = pcm;
-            int out_samples = samples;
+            int16_t *out;
+            int out_bytes;
+
             if (info.channels == 2) {
-                for (int i = 0; i < samples; i++)
-                    mono[i] = (int16_t)(((int32_t)pcm[2*i] + pcm[2*i+1]) / 2);
+                /* Stereo: output interleaved L R pairs directly */
+                out = pcm;
+                out_bytes = samples * 2 * sizeof(int16_t);
+            } else {
+                /* Mono: duplicate to stereo L R for proper I2S framing */
+                for (int i = samples - 1; i >= 0; i--) {
+                    mono[2*i]     = pcm[i];
+                    mono[2*i + 1] = pcm[i];
+                }
                 out = mono;
+                out_bytes = samples * 2 * sizeof(int16_t);
+            }
+
+            /* Pre-emphasis: boost treble for clarity on small speaker.
+             * y[n] = x[n] + coeff * (x[n] - x[n-1])
+             * coeff = 48/64 ≈ 0.75 → ~6 dB/oct above ~2 kHz */
+            {
+                static int16_t prev_l = 0, prev_r = 0;
+                int n_stereo = out_bytes / (2 * sizeof(int16_t));
+                for (int i = 0; i < n_stereo; i++) {
+                    int32_t l = out[2*i];
+                    int32_t r = out[2*i + 1];
+                    int32_t el = l + ((l - prev_l) * 48 >> 6);
+                    int32_t er = r + ((r - prev_r) * 48 >> 6);
+                    prev_l = (int16_t)l;
+                    prev_r = (int16_t)r;
+                    /* Clamp to int16 range */
+                    if (el > 32767) el = 32767; else if (el < -32768) el = -32768;
+                    if (er > 32767) er = 32767; else if (er < -32768) er = -32768;
+                    out[2*i]     = (int16_t)el;
+                    out[2*i + 1] = (int16_t)er;
+                }
             }
 
             size_t written;
-            i2s_channel_write(s_i2s_tx, out,
-                              out_samples * sizeof(int16_t),
+            i2s_channel_write(s_i2s_tx, out, out_bytes,
                               &written, pdMS_TO_TICKS(500));
         } else if (info.frame_bytes == 0 && fill > 0) {
             skip_count++;
@@ -958,7 +989,8 @@ bool music_player_is_active(void)
 void music_player_set_volume(uint8_t vol)
 {
     if (s_codec_dev) {
-        esp_codec_dev_write_reg(s_codec_dev, 0x32, vol);
+        float db = (float)vol * 127.5f / 255.0f - 95.5f;
+        esp_codec_dev_set_out_vol(s_codec_dev, db);
     }
 }
 

@@ -6,6 +6,7 @@ idf_component_register(
          "audio/mic_input.c"
          "screens/screen_clock.c"
          "screens/screen_menu.c"
+         "screens/screen_more.c"
          "screens/screen_settings.c"
          "screens/screen_tamafi.c"
          "screens/screen_wifi_cfg.c"
@@ -16,7 +17,9 @@ idf_component_register(
          "services/sd_log.c"
          "services/game_maze.c"
          "services/game_race.c"
+         "services/game_dino.c"
          "services/macropad.c"
+         "services/pomodoro.c"
     INCLUDE_DIRS "." "core" "audio" "screens" "services"
     REQUIRES bt
     PRIV_REQUIRES i2c_bsp lcd_bl_pwm_bsp nvs_flash esp_http_client esp_http_server esp_wifi esp_netif esp_event esp_timer driver esp_driver_i2s json joltwallet__littlefs mbedtls minimp3 esp_hid espressif__esp_codec_dev espressif__esp_audio_codec)
