@@ -964,7 +964,7 @@ static void card_click_cb(lv_event_t *e)
 /* ── Styles ───────────────────────────────────────────────── */
 static lv_style_t style_bg, style_card, style_icon, style_name;
 static lv_style_t style_dot_active, style_dot_inactive;
-static lv_obj_t *mode_dot[3];
+static lv_obj_t *mode_dot[4];
 
 static void init_styles(void)
 {
@@ -1112,7 +1112,7 @@ void screen_menu_create(void)
     lv_obj_set_style_pad_column(dot_row, 8, 0);
     lv_obj_clear_flag(dot_row, LV_OBJ_FLAG_SCROLLABLE);
 
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 4; i++) {
         mode_dot[i] = lv_obj_create(dot_row);
         lv_obj_remove_style_all(mode_dot[i]);
         if (i == 1)

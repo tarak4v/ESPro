@@ -34,7 +34,7 @@ static const more_entry_t apps[] = {
 /* ── Styles ───────────────────────────────────────────────── */
 static lv_style_t style_bg, style_card, style_icon, style_name;
 static lv_style_t style_dot_active, style_dot_inactive;
-static lv_obj_t  *mode_dot[3];
+static lv_obj_t  *mode_dot[4];
 
 static void init_styles(void)
 {
@@ -153,7 +153,7 @@ void screen_more_create(void)
     lv_obj_set_style_pad_column(dot_row, 8, 0);
     lv_obj_clear_flag(dot_row, LV_OBJ_FLAG_SCROLLABLE);
 
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 4; i++) {
         mode_dot[i] = lv_obj_create(dot_row);
         lv_obj_remove_style_all(mode_dot[i]);
         if (i == 2)
@@ -172,7 +172,7 @@ void screen_more_destroy(void)
     if (scr) {
         macropad_close();
         pomodoro_close();
-        for (int i = 0; i < 3; i++) mode_dot[i] = NULL;
+        for (int i = 0; i < 4; i++) mode_dot[i] = NULL;
         lv_obj_del(scr);
         scr = NULL;
     }

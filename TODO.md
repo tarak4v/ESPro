@@ -356,7 +356,7 @@ These items have partial implementations — just need wiring or small fixes.
 ### 10.3 Pomodoro Timer
 - **Idea:** Work/break timer (25/5 min) with sound alert. Useful for productivity.
 - **Effort:** Small-Medium
-- **Status:** ✅ Done — `pomodoro.c` overlay with 25/5 countdown, progress bar, session counter (NVS), auto-phase-switch, melody alert via `play_melody_async()`
+- **Status:** ⬜
 
 ### 10.4 Step Counter / Pedometer
 - **Issue:** IMU available but not used for health tracking.

@@ -11,6 +11,7 @@
 #include "screen_clock.h"
 #include "screen_menu.h"
 #include "screen_more.h"
+#include "screen_hud.h"
 #include "screen_settings.h"
 #include "screen_tamafi.h"
 #include "screen_wifi_cfg.h"
@@ -46,6 +47,7 @@ static const screen_ops_t screen_table[MODE_COUNT] = {
     [MODE_CLOCK]    = { screen_clock_create,    screen_clock_destroy    },
     [MODE_MENU]     = { screen_menu_create,     screen_menu_destroy     },
     [MODE_MORE]     = { screen_more_create,     screen_more_destroy     },
+    [MODE_HUD]      = { screen_hud_create,      screen_hud_destroy      },
     [MODE_SETTINGS] = { screen_settings_create, screen_settings_destroy },
     [MODE_TAMAFI]   = { screen_tamafi_create,   screen_tamafi_destroy   },
     [MODE_WIFI_CFG] = { screen_wifi_cfg_create, screen_wifi_cfg_destroy },
@@ -159,6 +161,7 @@ void app_manager_update(void)
         case MODE_CLOCK:    screen_clock_update();    break;
         case MODE_MENU:     screen_menu_update();     break;
         case MODE_MORE:     screen_more_update();     break;
+        case MODE_HUD:      screen_hud_update();      break;
         case MODE_TAMAFI:   screen_tamafi_update();   break;
         case MODE_WIFI_CFG: screen_wifi_cfg_update(); break;
         default: break;

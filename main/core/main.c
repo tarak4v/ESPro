@@ -42,6 +42,10 @@
 #include "sd_log.h"
 #include "macropad.h"
 #include "mic_input.h"
+#include "task_manager.h"
+#include "wellness.h"
+#include "gesture.h"
+#include "ble_calendar.h"
 
 static const char *TAG = "main";
 
@@ -423,6 +427,12 @@ void app_main(void)
 
     /* Initialise microphone (ES7210 ADC) */
     mic_init();
+
+    /* Initialise HUD subsystems */
+    task_manager_init();
+    wellness_init();
+    gesture_init();
+    ble_calendar_init();
 
     /* ── Touch input device ───────────────────────────────── */
     static lv_indev_drv_t indev_drv;

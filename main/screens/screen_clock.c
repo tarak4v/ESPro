@@ -31,7 +31,7 @@ static lv_obj_t *time_label     = NULL;
 static lv_obj_t *ampm_label     = NULL;
 static lv_obj_t *date_label     = NULL;
 static lv_obj_t *weekday_label  = NULL;
-static lv_obj_t *mode_dot[3];
+static lv_obj_t *mode_dot[4];
 static lv_obj_t *wifi_icon      = NULL;
 static lv_obj_t *bt_icon        = NULL;
 static lv_obj_t *weather_temp   = NULL;
@@ -368,7 +368,7 @@ void screen_clock_create(void)
     lv_obj_set_style_pad_column(dot_row, 8, 0);
     lv_obj_clear_flag(dot_row, LV_OBJ_FLAG_SCROLLABLE);
 
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 4; i++) {
         mode_dot[i] = lv_obj_create(dot_row);
         lv_obj_remove_style_all(mode_dot[i]);
         if (i == 0)
@@ -394,7 +394,7 @@ void screen_clock_destroy(void)
         ampm_label    = NULL;
         date_label    = NULL;
         weekday_label = NULL;
-        for (int i = 0; i < 3; i++) mode_dot[i] = NULL;
+        for (int i = 0; i < 4; i++) mode_dot[i] = NULL;
         for (int i = 0; i < 4; i++) flip_digit[i] = NULL;
         flip_colon    = NULL;
         memset(flip_prev, '?', sizeof(flip_prev));
